@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>325</width>
-    <height>341</height>
+    <width>407</width>
+    <height>565</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
@@ -17,14 +17,59 @@
       <string>Inputs</string>
      </property>
      <layout class="QGridLayout" name="gridLayout">
-      <item row="9" column="0">
-       <widget class="QLabel" name="label_distanceTolerance">
-        <property name="text">
-         <string>Tolerance (mm):</string>
+      <item row="3" column="1" colspan="2">
+       <widget class="qMRMLSliderWidget" name="maxVolumeThreshold">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <double>10000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>1500.000000000000000</double>
+        </property>
+        <property name="quantity">
+         <string notr="true"/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>maxVolumeThreshold</string>
         </property>
        </widget>
       </item>
-      <item row="0" column="1" colspan="3">
+      <item row="2" column="0">
+       <widget class="QLabel" name="label_minVolumeThreshold">
+        <property name="text">
+         <string>Min. Volume (mm³):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="label_maxVolumeThreshold">
+        <property name="text">
+         <string>Max. Volume (mm³):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1" colspan="2">
+       <widget class="qMRMLSliderWidget" name="minVolumeThreshold">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <double>10000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>150.000000000000000</double>
+        </property>
+        <property name="quantity">
+         <string notr="true"/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>minVolumeThreshold</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1" colspan="2">
        <widget class="qMRMLNodeComboBox" name="inputSelector">
         <property name="sizePolicy">
          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
@@ -54,186 +99,37 @@
         </property>
        </widget>
       </item>
-      <item row="6" column="2">
-       <widget class="qMRMLSpinBox" name="joint2_length_a">
-        <property name="alignment">
-         <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
-        </property>
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>70.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint2_length_a</string>
-        </property>
-       </widget>
-      </item>
-      <item row="7" column="2">
-       <widget class="qMRMLSpinBox" name="joint3_length_a">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>70.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint3_length_a</string>
-        </property>
-       </widget>
-      </item>
-      <item row="4" column="3">
-       <widget class="qMRMLSpinBox" name="lengthA">
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-          <horstretch>0</horstretch>
-          <verstretch>0</verstretch>
-         </sizepolicy>
-        </property>
-        <property name="alignment">
-         <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
-        </property>
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>20.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint1_length_b</string>
-        </property>
-       </widget>
-      </item>
-      <item row="4" column="0">
-       <widget class="QLabel" name="label_joint1">
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_intensityThreshold">
         <property name="text">
-         <string>Joint 1 Distances (mm):</string>
+         <string>Intensity Threshold:</string>
         </property>
        </widget>
       </item>
-      <item row="7" column="0">
-       <widget class="QLabel" name="label_joint3">
+      <item row="5" column="0">
+       <widget class="QLabel" name="label_distanceTolerance">
         <property name="text">
-         <string>Joint 3 Distances (mm):</string>
+         <string>Tolerance (mm):</string>
         </property>
        </widget>
       </item>
-      <item row="10" column="3">
-       <widget class="QCheckBox" name="renderRobotModelCheckBox">
-        <property name="text">
-         <string/>
-        </property>
-        <property name="checked">
-         <bool>true</bool>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>renderRobotModel</string>
-        </property>
-       </widget>
-      </item>
-      <item row="8" column="0">
-       <widget class="QLabel" name="label_joint4">
-        <property name="text">
-         <string>Joint 4 Distances (mm):</string>
-        </property>
-       </widget>
-      </item>
-      <item row="7" column="3">
-       <widget class="qMRMLSpinBox" name="joint3_length_b">
-        <property name="decimals">
-         <number>0</number>
-        </property>
+      <item row="5" column="2">
+       <widget class="qMRMLSpinBox" name="tolerance">
         <property name="maximum">
-         <double>100.000000000000000</double>
+         <double>10.000000000000000</double>
         </property>
         <property name="value">
-         <double>20.000000000000000</double>
+         <double>3.000000000000000</double>
         </property>
         <property name="quantity">
          <string notr="true"/>
         </property>
         <property name="SlicerParameterName" stdset="0">
-         <string>joint3_length_b</string>
+         <string>distance_tolerance</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="1" colspan="3">
-       <widget class="qMRMLSliderWidget" name="maxVolumeThreshold">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>10000.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>1500.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>maxVolumeThreshold</string>
-        </property>
-       </widget>
-      </item>
-      <item row="8" column="3">
-       <widget class="qMRMLSpinBox" name="joint4_length_b">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>20.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint4_length_b</string>
-        </property>
-       </widget>
-      </item>
-      <item row="8" column="2">
-       <widget class="qMRMLSpinBox" name="joint4_length_a">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>45.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint4_length_a</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1" colspan="3">
+      <item row="1" column="1" colspan="2">
        <widget class="qMRMLSliderWidget" name="intensityThreshold">
         <property name="sizePolicy">
          <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
@@ -258,147 +154,10 @@
         </property>
        </widget>
       </item>
-      <item row="2" column="1" colspan="3">
-       <widget class="qMRMLSliderWidget" name="minVolumeThreshold">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>10000.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>150.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>minVolumeThreshold</string>
-        </property>
-       </widget>
-      </item>
-      <item row="6" column="0">
-       <widget class="QLabel" name="label_joint2">
-        <property name="text">
-         <string>Joint 2 Distances (mm):</string>
-        </property>
-       </widget>
-      </item>
-      <item row="10" column="0">
-       <widget class="QLabel" name="label_drawJoints">
-        <property name="text">
-         <string>Draw robot joints:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="label_intensityThreshold">
-        <property name="text">
-         <string>Intensity Threshold:</string>
-        </property>
-       </widget>
-      </item>
       <item row="0" column="0">
        <widget class="QLabel" name="label_inputSelector">
         <property name="text">
          <string>Input volume:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="4" column="2">
-       <widget class="qMRMLSpinBox" name="joint1_length_a">
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-          <horstretch>0</horstretch>
-          <verstretch>0</verstretch>
-         </sizepolicy>
-        </property>
-        <property name="alignment">
-         <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
-        </property>
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>40.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint1_length_a</string>
-        </property>
-       </widget>
-      </item>
-      <item row="9" column="3">
-       <widget class="qMRMLSpinBox" name="tolerance">
-        <property name="maximum">
-         <double>10.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>3.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>distance_tolerance</string>
-        </property>
-       </widget>
-      </item>
-      <item row="6" column="3">
-       <widget class="qMRMLSpinBox" name="lengthB">
-        <property name="alignment">
-         <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
-        </property>
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>100.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>25.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>joint2_length_b</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="0">
-       <widget class="QLabel" name="label_maxVolumeThreshold">
-        <property name="text">
-         <string>Max. Volume (mm³):</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="0">
-       <widget class="QLabel" name="label_minVolumeThreshold">
-        <property name="text">
-         <string>Min. Volume (mm³):</string>
-        </property>
-       </widget>
-      </item>
-      <item row="11" column="0">
-       <widget class="QLabel" name="label">
-        <property name="text">
-         <string>DEBUG:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="11" column="3">
-       <widget class="ctkCheckBox" name="marker_debugCheckBox">
-        <property name="checked">
-         <bool>false</bool>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>marker_debug</string>
         </property>
        </widget>
       </item>
@@ -416,6 +175,49 @@
      <property name="text">
       <string>Apply</string>
      </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="widget" native="true">
+     <layout class="QGridLayout" name="gridLayout_2">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_2">
+        <property name="text">
+         <string>Toggle Marker Visibility:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="ctkCheckBox" name="drawFiducialsCheckBox">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+        <property name="tristate">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_3">
+        <property name="text">
+         <string>Toggle Robot Visibility:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="ctkCheckBox" name="drawModelsCheckBox">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
     </widget>
    </item>
    <item>

@@ -49,20 +49,7 @@ class MamriParameterNode:
     intensityThreshold: Annotated[float, WithinRange(0.0, 5000.0)] = 65.0
     minVolumeThreshold: Annotated[float, WithinRange(0.0, 10000.0)] = 150.0
     maxVolumeThreshold: Annotated[float, WithinRange(0.0, 10000.0)] = 1500.0
-
-    joint1_length_a: Annotated[float, WithinRange(0.0, 100.0)] = 40.0
-    joint1_length_b: Annotated[float, WithinRange(0.0, 100.0)] = 20.0
-    joint2_length_a: Annotated[float, WithinRange(0.0, 100.0)] = 70.0
-    joint2_length_b: Annotated[float, WithinRange(0.0, 100.0)] = 25.0
-    joint3_length_a: Annotated[float, WithinRange(0.0, 100.0)] = 70.0
-    joint3_length_b: Annotated[float, WithinRange(0.0, 100.0)] = 20.0
-    joint4_length_a: Annotated[float, WithinRange(0.0, 100.0)] = 45.0
-    joint4_length_b: Annotated[float, WithinRange(0.0, 100.0)] = 20.0
     distance_tolerance: Annotated[float, WithinRange(0.0, 10.0)] = 3.0
-
-    renderRobotModel: bool = False
-    marker_debug: bool = False
-
 #
 # MamriWidget
 #
@@ -81,14 +68,22 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui = slicer.util.childWidgetVariables(uiWidget)
         
         # Ensure critical UI elements exist before connecting/using
-        if not hasattr(self.ui, "renderRobotModelCheckBox"): logging.warning("MamriWidget.setup: 'renderRobotModelCheckBox' not found.")
-        if not hasattr(self.ui, "marker_debugCheckBox"): logging.warning("MamriWidget.setup: 'marker_debugCheckBox' not found.")
         if hasattr(self.ui, "applyButton"):
             self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
         else:
             logging.error("MamriWidget.setup: 'applyButton' not found in UI. Processing cannot be triggered.")
-
+        if hasattr(self.ui, "drawFiducialsCheckBox"):
+            self.ui.drawFiducialsCheckBox.connect("toggled(bool)", self.onDrawFiducialsCheckBoxToggled)
+            logging.info("MamriWidget.setup: 'drawFiducialsCheckBox' connected.")
+        else:
+            logging.warning("MamriWidget.setup: 'drawFiducialsCheckBox' not found in UI. Cannot connect toggle signal.")
+        if hasattr(self.ui, "drawModelsCheckBox"):
+            self.ui.drawModelsCheckBox.connect("toggled(bool)", self.onDrawModelsCheckBoxToggled)
+            logging.info("MamriWidget.setup: 'drawModelsCheckBox' connected.")
+        else:
+            logging.warning("MamriWidget.setup: 'drawModelsCheckBox' not found in UI. Cannot connect toggle signal.")
         uiWidget.setMRMLScene(slicer.mrmlScene)
+
         self.logic = MamriLogic()
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
@@ -131,7 +126,7 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "applyButton") and self.ui.applyButton:
             self.ui.applyButton.enabled = can_apply
             if can_apply:
-                tooltip = _("Run fiducial detection and robot model rendering with IK.") if self._parameterNode.renderRobotModel else _("Run the fiducial detection algorithm.")
+                tooltip = _("Run fiducial detection and robot model rendering with IK.") 
             else:
                 tooltip = _("Select an input volume node.")
             self.ui.applyButton.toolTip = tooltip
@@ -143,6 +138,12 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
             self.logic.process(self._parameterNode)
 
+    def onDrawFiducialsCheckBoxToggled(self, checked: bool) -> None:
+        self.logic._toggle_robot_markers(checked)
+
+    def onDrawModelsCheckBoxToggled(self, checked: bool) -> None:
+        self.logic._toggle_robot_models(checked)
+    
 #
 # MamriLogic
 #
@@ -181,7 +182,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 "name": "Baseplate", "stl_path": os.path.join(base_path, "Baseplate.STL"),
                 "parent": None, "fixed_offset_to_parent": None, "has_markers": True,
                 "local_marker_coords": [(-10.0, 20.0, 5.0), (10.0, 20.0, 5.0), (-10.0, -20.0, 5.0)],
-                "lengths_param_names": ("joint1_length_a", "joint1_length_b"), 
+                "arm_lengths": (40.0, 20.0),
                 "color": (1, 0, 0),
                 "articulation_axis": None
             },
@@ -194,7 +195,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 "name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"),
                 "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)),
                 "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)],
-                "lengths_param_names": ("joint2_length_a", "joint2_length_b"), 
+                "arm_lengths": (70.0, 25.0),
                 "color": (0, 1, 0),
                 "articulation_axis": "PA"
             },
@@ -207,7 +208,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 "name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"),
                 "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, -35)),
                 "has_markers": True, "local_marker_coords": [(10, 35.0, 120.0), (-10, 35.0, 120.0), (-10, -35.0, 120.0)],
-                "lengths_param_names": ("joint3_length_a", "joint3_length_b"), "color": (0, 1, 0),
+                "arm_lengths": (70.0, 20.0), 
+                "color": (0, 1, 0),
                 "articulation_axis": "IS"
             },
             {
@@ -222,14 +224,15 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             },
             {
                 "name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"),
-                "parent": "Link2", "fixed_offset_to_parent": self._create_offset_matrix((0, -35, 60)),
+                "parent": "Link2", "fixed_offset_to_parent": self._create_offset_matrix((0, 20, 60)),
                 "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA"
             },
             {
                 "name": "End", "stl_path": os.path.join(base_path, "End.STL"),
-                "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)),
+                "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, -55, 0)),
                 "has_markers": True, "local_marker_coords": [(-10, 22.5, 30), (10, 22.5, 30), (-10, -22.5, 30)],
-                "lengths_param_names": ("joint4_length_a", "joint4_length_b"), "color": (1, 0, 0),
+                "arm_lengths": (45.0, 20.0),
+                "color": (1, 0, 0),
                 "articulation_axis": "IS"
             },
         ]
@@ -250,10 +253,9 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         identified_joints_data = self.joint_detection(parameterNode)
         self._handle_joint_detection_results(identified_joints_data)
 
-        if parameterNode.renderRobotModel:
-            logging.info("Rendering robot model and performing IK...")
-            self._build_robot_model(identified_joints_data)
-            self._solve_all_ik_chains(identified_joints_data, parameterNode.marker_debug)
+        logging.info("Rendering robot model and performing IK...")
+        self._build_robot_model(identified_joints_data)
+        self._solve_all_ik_chains(identified_joints_data)
 
         logging.info("Mamri processing finished.")
 
@@ -290,7 +292,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 else:
                     logging.error(f"Parent '{parent_name}' node not found for '{jn}'.")
 
-    def _solve_all_ik_chains(self, identified_joints_data: Dict[str, List[Dict]], show_debug: bool):
+    def _solve_all_ik_chains(self, identified_joints_data: Dict[str, List[Dict]]):
         """Iterates through IK chains and solves them."""
         for chain in self.ik_chains_config:
             distal_name = chain["distal_with_markers"]
@@ -303,7 +305,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 self._solve_and_apply_generic_two_joint_ik(
                     chain["parent_of_proximal"], chain["proximal"], distal_name, fiducials_node
                 )
-                self._visualize_joint_local_markers_in_world(distal_name, show_debug)
+                self._visualize_joint_local_markers_in_world(distal_name)
             else:
                 logging.warning(f"Skipping IK for {chain['log_name']} due to missing data or nodes.")
 
@@ -396,11 +398,10 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         logging.info(f"  Overall RMSE: {math.sqrt(total_rmse_sq / num_markers):.2f} mm")
 
 
-    def _visualize_joint_local_markers_in_world(self, joint_name: str, show_debug_markers: bool):
+    def _visualize_joint_local_markers_in_world(self, joint_name: str):
         """Creates debug markers showing local coordinates in world space."""
         debug_node_name = f"{joint_name}_LocalMarkers_WorldView_DEBUG"
         self._clear_node_by_name(debug_node_name)
-        if not show_debug_markers: return
 
         joint_def = self.robot_definition_dict.get(joint_name)
         joint_art_node = self.jointTransformNodes.get(joint_name)
@@ -417,7 +418,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             disp.SetGlyphScale(3.0); disp.SetTextScale(3.5)
             r, g, b = joint_def.get("color", (0.1, 0.8, 0.8))
             disp.SetSelectedColor(r * 0.7, g * 0.7, b * 0.7); disp.SetColor(r, g, b)
-            disp.SetOpacity(0.75)
+            disp.SetOpacity(0)
 
         prefix = "".join(w[0] for w in joint_name.split() if w)[:3].upper()
         for i, local_p in enumerate(local_coords):
@@ -527,11 +528,14 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
         for jc in self.robot_definition:
             if not jc.get("has_markers"): continue
-            jn, lens_names = jc["name"], jc.get("lengths_param_names")
-            if not lens_names or len(lens_names) < 2: 
-                logging.warning(f"'{jn}' missing lengths. Skipping."); continue
+            jn = jc["name"]
             
-            l1, l2 = getattr(pNode, lens_names[0]), getattr(pNode, lens_names[1])
+            arm_lengths = jc.get("arm_lengths") 
+            if not arm_lengths or len(arm_lengths) != 2: 
+                logging.warning(f"'{jn}' missing 'arm_lengths' in its definition or 'arm_lengths' does not contain exactly two values. Skipping.")
+                continue
+            
+            l1, l2 = arm_lengths[0], arm_lengths[1]
             expected_dists = sorted([l1, l2, math.hypot(l1, l2)])
             available = [f for f in all_fiducials if f["id"] not in used_ids]
             if len(available) < 3: continue
@@ -603,6 +607,36 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
         self.jointModelNodes.clear(); self.jointTransformNodes.clear(); self.jointFixedOffsetTransformNodes.clear()
         logging.info("Cleanup complete.")
+
+    def _toggle_robot_markers(self, checked: bool):
+        
+        marker_names = set()
+
+        for jc in self.robot_definition:
+            if jc.get("has_markers"):
+                marker_names.add(f"{jc['name']}Fiducials")
+        
+        for name in marker_names:
+            node = slicer.mrmlScene.GetFirstNodeByName(name)
+            if node and isinstance(node , slicer.vtkMRMLMarkupsFiducialNode):
+                disp = node.GetDisplayNode()
+                if disp: 
+                    disp.SetVisibility(checked)
+    
+    def _toggle_robot_models(self, checked: bool):
+        
+        model_names = set()
+
+        for jc in self.robot_definition:
+            model_names.add(f"{jc['name']}Model")
+        
+        for name in model_names:
+            node = slicer.mrmlScene.GetFirstNodeByName(name)
+            if node and isinstance(node , slicer.vtkMRMLModelNode):
+                disp = node.GetDisplayNode()
+                if disp: 
+                    disp.SetVisibility(checked)
+
 
 #
 # MamriTest
