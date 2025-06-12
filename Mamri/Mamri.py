@@ -22,7 +22,9 @@ from slicer.parameterNodeWrapper import (
 from slicer import vtkMRMLScalarVolumeNode
 from slicer import vtkMRMLModelNode
 from slicer import vtkMRMLLinearTransformNode
+from slicer import vtkMRMLSegmentationNode
 from slicer import vtkMRMLMarkupsFiducialNode
+
 
 #
 # Mamri (Module Class)
@@ -50,6 +52,10 @@ class MamriParameterNode:
     minVolumeThreshold: Annotated[float, WithinRange(0.0, 10000.0)] = 150.0
     maxVolumeThreshold: Annotated[float, WithinRange(0.0, 10000.0)] = 1500.0
     distance_tolerance: Annotated[float, WithinRange(0.0, 10.0)] = 3.0
+
+    segmentationNode: vtkMRMLSegmentationNode
+    targetFiducialNode: vtkMRMLMarkupsFiducialNode
+    safetyDistance: Annotated[float, WithinRange(0.0, 50.0)] = 5.0
 #
 # MamriWidget
 #
@@ -67,11 +73,14 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
         
-        # Ensure critical UI elements exist before connecting/using
         if hasattr(self.ui, "applyButton"):
             self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
         else:
             logging.error("MamriWidget.setup: 'applyButton' not found in UI. Processing cannot be triggered.")
+        if hasattr(self.ui, "planTrajectoryButton"):
+            self.ui.planTrajectoryButton.connect("clicked(bool)", self.onPlanTrajectoryButton)
+        else:
+            logging.error("MamriWidget.setup: 'planTrajectory' not found in UI. Processing cannot be triggered.")    
         if hasattr(self.ui, "drawFiducialsCheckBox"):
             self.ui.drawFiducialsCheckBox.connect("toggled(bool)", self.onDrawFiducialsCheckBoxToggled)
             logging.info("MamriWidget.setup: 'drawFiducialsCheckBox' connected.")
@@ -112,6 +121,8 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._parameterNodeGuiTag = None
             if self.hasObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply):
                 self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
+            if self.hasObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanPlanTrajectory):
+                self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanPlanTrajectory)
 
     def setParameterNode(self, inputParameterNode: Optional[MamriParameterNode]) -> None:
         self.remove_parameter_node_observers()
@@ -119,7 +130,11 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._parameterNode:
             self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
             self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
+            # New observer connection
+            self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanPlanTrajectory)
         self._checkCanApply()
+        # New check function call
+        self._checkCanPlanTrajectory()
 
     def _checkCanApply(self, caller=None, event=None) -> None:
         can_apply = self._parameterNode and self._parameterNode.inputVolume is not None
@@ -131,12 +146,35 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 tooltip = _("Select an input volume node.")
             self.ui.applyButton.toolTip = tooltip
 
+    def _checkCanPlanTrajectory(self, caller=None, event=None) -> None:
+        if not hasattr(self.ui, "planTrajectoryButton"):
+            return
+        
+        can_plan = (self._parameterNode and 
+                    self._parameterNode.segmentationNode and 
+                    self._parameterNode.targetFiducialNode)
+        
+        self.ui.planTrajectoryButton.enabled = bool(can_plan)
+        if can_plan:
+            tooltip = _("Calculate the robot joint angles to target the fiducial.")
+        else:
+            tooltip = _("Select a patient segmentation and a target fiducial to enable planning.")
+        self.ui.planTrajectoryButton.toolTip = tooltip
+
     def onApplyButton(self) -> None:
         if not self._parameterNode:
             slicer.util.errorDisplay("Parameter node is not initialized.")
             return
         with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
             self.logic.process(self._parameterNode)
+    
+    def onPlanTrajectoryButton(self) -> None:
+        if not self._parameterNode:
+            slicer.util.errorDisplay("Parameter node is not initialized.")
+            return
+        # with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
+        #     self.logic.planTrajectory(self._parameterNode)
+        
 
     def onDrawFiducialsCheckBoxToggled(self, checked: bool) -> None:
         self.logic._toggle_robot_markers(checked)
