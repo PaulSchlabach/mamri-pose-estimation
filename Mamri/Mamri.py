@@ -24,6 +24,7 @@ from slicer import vtkMRMLModelNode
 from slicer import vtkMRMLLinearTransformNode
 from slicer import vtkMRMLSegmentationNode
 from slicer import vtkMRMLMarkupsFiducialNode
+from slicer import vtkMRMLLabelMapVolumeNode
 
 
 #
@@ -605,34 +606,103 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return identified
 
     def volume_threshold_segmentation(self, pNode: 'MamriParameterNode') -> None:
-        """Segments potential markers based on intensity and volume."""
+        """
+        Segments potential markers based on intensity and volume.
+        """
         try:
             sitk_img = sitkUtils.PullVolumeFromSlicer(pNode.inputVolume)
-        except Exception as e: logging.error(f"Failed to pull volume: {e}"); return
+        except Exception as e:
+            logging.error(f"Failed to pull volume: {e}")
+            return
 
         binary = sitk.BinaryThreshold(sitk_img, pNode.intensityThreshold, 65535)
         closed = sitk.BinaryMorphologicalClosing(binary, [2] * 3, sitk.sitkBall)
         labeled = sitk.ConnectedComponent(closed)
-        stats = sitk.LabelShapeStatisticsImageFilter(); stats.Execute(labeled)
-        
+        stats = sitk.LabelShapeStatisticsImageFilter()
+        stats.Execute(labeled)
+
         fiducials_data = [
             {"vol": stats.GetPhysicalSize(lbl), "centroid": stats.GetCentroid(lbl), "id": lbl}
-            for lbl in stats.GetLabels() if pNode.minVolumeThreshold <= stats.GetPhysicalSize(lbl) <= pNode.maxVolumeThreshold
+            for lbl in stats.GetLabels()
+            if pNode.minVolumeThreshold <= stats.GetPhysicalSize(lbl) <= pNode.maxVolumeThreshold
         ]
 
         self._clear_node_by_name("DetectedFiducials")
-        if not fiducials_data: logging.info("No components met volume criteria."); return
+        if not fiducials_data:
+            logging.info("No components met fiducial volume criteria.")
+        else:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "DetectedFiducials")
+            if disp := node.GetDisplayNode():
+                disp.SetGlyphScale(1.0); disp.SetColor(0.9, 0.9, 0.1); disp.SetSelectedColor(1.0, 0.5, 0.0); disp.SetVisibility(False)
 
-        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "DetectedFiducials")
-        if disp := node.GetDisplayNode():
-            disp.SetGlyphScale(1.0); disp.SetColor(0.9, 0.9, 0.1); disp.SetSelectedColor(1.0, 0.5, 0.0); disp.SetVisibility(0)
+            for fd in fiducials_data:
+                lps = fd["centroid"]
+                idx = node.AddControlPoint([-lps[0], -lps[1], lps[2]])
+                node.SetNthControlPointLabel(idx, f"M_{fd['id']}_{fd['vol']:.0f}mm³")
+            logging.info(f"Created 'DetectedFiducials' with {len(fiducials_data)} points. 🔬")
 
-        for fd in fiducials_data:
-            lps = fd["centroid"]
-            idx = node.AddControlPoint([-lps[0], -lps[1], lps[2]]) # LPS to RAS
-            node.SetNthControlPointLabel(idx, f"M_{fd['id']}_{fd['vol']:.0f}mm³")
-        logging.info(f"Created 'DetectedFiducials' with {len(fiducials_data)} points. 🔬")
+        all_labels = stats.GetLabels()
+        if not all_labels:
+            logging.warning("No objects found in image after thresholding.")
+            return
 
+        fiducial_ids = {f['id'] for f in fiducials_data}
+        non_fiducial_labels = [lbl for lbl in all_labels if lbl not in fiducial_ids]
+        
+        if not non_fiducial_labels:
+            logging.warning("No large components found to segment as body.")
+            return
+
+        largest_label_id = max(non_fiducial_labels, key=lambda lbl: stats.GetPhysicalSize(lbl))
+        max_volume = stats.GetPhysicalSize(largest_label_id)
+        logging.info(f"Largest object (label {largest_label_id}, volume {max_volume:.2f} mm³) will be segmented as body.")
+
+        largest_object_img = sitk.BinaryThreshold(labeled, lowerThreshold=largest_label_id, upperThreshold=largest_label_id, insideValue=1, outsideValue=0)
+        largest_object_img = sitk.Cast(largest_object_img, sitk.sitkUInt8) 
+
+        temp_labelmap_name = "TempBodyLabelMap"
+        self._clear_node_by_name(temp_labelmap_name)
+        
+        tempLabelmapNode = sitkUtils.PushVolumeToSlicer(largest_object_img, name=temp_labelmap_name, className="vtkMRMLLabelMapVolumeNode")
+        
+        if not tempLabelmapNode:
+            logging.error("sitkUtils.PushVolumeToSlicer failed to create a temporary labelmap.")
+            return
+            
+        segmentation_node_name = "AutoBodySegmentation"
+        self._clear_node_by_name(segmentation_node_name)
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", segmentation_node_name)
+        
+        success = slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(tempLabelmapNode, segmentationNode)
+        
+        slicer.mrmlScene.RemoveNode(tempLabelmapNode)
+
+        if not success:
+            logging.error("Failed to import labelmap into segmentation node.")
+            slicer.mrmlScene.RemoveNode(segmentationNode) 
+            return
+
+        segmentation = segmentationNode.GetSegmentation()
+        if segmentation.GetNumberOfSegments() > 0:
+            segment = segmentation.GetNthSegment(segmentation.GetNumberOfSegments() - 1)
+            segment.SetName("Body")
+
+            colorTableNode = slicer.mrmlScene.GetFirstNodeByName('GenericAnatomyColors')
+            if colorTableNode:
+                color = [0.0, 0.0, 0.0, 0.0] 
+                colorTableNode.GetColor(3, color) 
+                segment.SetColor(color[0], color[1], color[2])  
+            else:
+                logging.warning("Could not find 'GenericAnatomyColors' node. Using a default red color.")
+                segment.SetColor(0.8, 0.2, 0.2)
+
+        segmentationNode.CreateDefaultDisplayNodes()
+        if dispNode := segmentationNode.GetDisplayNode():
+            dispNode.SetOpacity(0.75)
+            dispNode.SetVisibility3D(True)
+
+        pNode.segmentationNode = segmentationNode
+        logging.info(f"Successfully created and selected '{segmentation_node_name}'.")
 
     def _cleanup_module_nodes(self):
         """Removes all nodes created by this module."""
