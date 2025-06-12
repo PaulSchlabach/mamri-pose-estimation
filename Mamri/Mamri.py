@@ -235,6 +235,16 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 "color": (1, 0, 0),
                 "articulation_axis": "IS"
             },
+            {
+                "name": "EndEffectorHolder", "stl_path": os.path.join(base_path, "EndEffectorHolder.STL"),
+                "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 35)),
+                "has_markers": False, "color": (0, 1, 0), "articulation_axis": None
+            },
+            {
+                "name": "NeedleHolder", "stl_path": os.path.join(base_path, "NeedleHolder.STL"),
+                "parent": "EndEffectorHolder", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 26.05)),
+                "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X"
+            }
         ]
 
     def getParameterNode(self) -> MamriParameterNode:
