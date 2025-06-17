@@ -108,7 +108,6 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             logging.warning("MamriWidget.setup: 'saveBaseplateButton' not found in UI.")
         
-        # NEW: Connect the "Find Optimal Entry Point" button to its handler function.
         if hasattr(self.ui, "findEntryPointButton"):
             self.ui.findEntryPointButton.setToolTip(_("Automatically find the point on the patient's skin closest to the target marker and set it as the Entry Point."))
             self.ui.findEntryPointButton.connect("clicked(bool)", self.onFindEntryPointButton)
@@ -193,8 +192,15 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def onApplyButton(self) -> None:
         if not self._parameterNode:
-            slicer.util.errorDisplay("Parameter node is not initialized."); return
-        self.logic.process(self._parameterNode)
+            slicer.util.errorDisplay("Parameter node is not initialized.")
+            return
+        
+        # Get the state of the visibility checkboxes
+        models_visible = self.ui.drawModelsCheckBox.isChecked() if hasattr(self.ui, "drawModelsCheckBox") else True
+        markers_visible = self.ui.drawFiducialsCheckBox.isChecked() if hasattr(self.ui, "drawFiducialsCheckBox") else True
+        
+        # Pass the visibility states to the logic
+        self.logic.process(self._parameterNode, models_visible=models_visible, markers_visible=markers_visible)
         self._checkCanPlanTrajectory()
     
     def onPlanTrajectoryButton(self) -> None:
@@ -202,7 +208,6 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay("Parameter node is not initialized."); return
         self.logic.planTrajectory(self._parameterNode)
 
-    # NEW: Handler function for the "Find Optimal Entry Point" button.
     def onFindEntryPointButton(self) -> None:
         if not self._parameterNode:
             slicer.util.errorDisplay("Parameter node is not initialized.")
@@ -213,149 +218,6 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
             
         self.logic.findAndSetEntryPoint(self._parameterNode)
-
-    def onSaveBaseplateButton(self) -> None:
-        if not self.logic:
-            slicer.util.errorDisplay("Logic module is not initialized."); return
-        baseplate_tf_node = self.logic.jointTransformNodes.get("Baseplate")
-        if not baseplate_tf_node:
-            slicer.util.errorDisplay("Baseplate has not been processed yet. Run fiducial detection first to establish its transform."); return
-        self.logic.saveBaseplateTransform(baseplate_tf_node)
-        slicer.util.infoDisplay(f"Baseplate transform saved successfully to node: '{self.logic.SAVED_BASEPLATE_TRANSFORM_NODE_NAME}'.")
-
-    def onDrawFiducialsCheckBoxToggled(self, checked: bool) -> None:
-        self.logic._toggle_robot_markers(checked)
-
-    def onDrawModelsCheckBoxToggled(self, checked: bool) -> None:
-        self.logic._toggle_robot_models(checked)
-    def __init__(self, parent=None) -> None:
-        ScriptedLoadableModuleWidget.__init__(self, parent)
-        VTKObservationMixin.__init__(self)
-        self.logic = None
-        self._parameterNode = None
-        self._parameterNodeGuiTag = None
-
-    def setup(self) -> None:
-        ScriptedLoadableModuleWidget.setup(self)
-        uiWidget = slicer.util.loadUI(self.resourcePath("UI/Mamri.ui"))
-        self.layout.addWidget(uiWidget)
-        self.ui = slicer.util.childWidgetVariables(uiWidget)
-        
-        if hasattr(self.ui, "applyButton"):
-            self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
-        else:
-            logging.error("MamriWidget.setup: 'applyButton' not found in UI. Processing cannot be triggered.")
-        if hasattr(self.ui, "planTrajectoryButton"):
-            self.ui.planTrajectoryButton.connect("clicked(bool)", self.onPlanTrajectoryButton)
-        else:
-            logging.error("MamriWidget.setup: 'planTrajectory' not found in UI. Processing cannot be triggered.")    
-        if hasattr(self.ui, "drawFiducialsCheckBox"):
-            self.ui.drawFiducialsCheckBox.connect("toggled(bool)", self.onDrawFiducialsCheckBoxToggled)
-        else:
-            logging.warning("MamriWidget.setup: 'drawFiducialsCheckBox' not found in UI.")
-        if hasattr(self.ui, "drawModelsCheckBox"):
-            self.ui.drawModelsCheckBox.connect("toggled(bool)", self.onDrawModelsCheckBoxToggled)
-        else:
-            logging.warning("MamriWidget.setup: 'drawModelsCheckBox' not found in UI.")
-
-        if hasattr(self.ui, "useSavedBaseplateCheckBox"):
-            self.ui.useSavedBaseplateCheckBox.setToolTip(_("If checked, use the previously saved baseplate transform instead of detecting it from the current scan."))
-        else:
-            logging.warning("MamriWidget.setup: 'useSavedBaseplateCheckBox' not found in UI.")
-
-        if hasattr(self.ui, "saveBaseplateButton"):
-            self.ui.saveBaseplateButton.setToolTip(_("Saves the current Baseplate transform for later use. Requires the Baseplate to be detected and processed in the current scan."))
-            self.ui.saveBaseplateButton.connect("clicked(bool)", self.onSaveBaseplateButton)
-        else:
-            logging.warning("MamriWidget.setup: 'saveBaseplateButton' not found in UI.")
-        
-        uiWidget.setMRMLScene(slicer.mrmlScene)
-
-        self.logic = MamriLogic()
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
-        self.initializeParameterNode()
-
-    def cleanup(self) -> None: self.removeObservers()
-    def enter(self) -> None: 
-        self.initializeParameterNode()
-        self._checkCanPlanTrajectory()
-
-    def exit(self) -> None:
-        self.remove_parameter_node_observers()
-
-    def onSceneStartClose(self, caller, event) -> None: self.setParameterNode(None)
-    def onSceneEndClose(self, caller, event) -> None:
-        if self.parent.isEntered: self.initializeParameterNode()
-
-    def initializeParameterNode(self) -> None:
-        self.logic = self.logic or MamriLogic()
-        self.setParameterNode(self.logic.getParameterNode())
-        if self._parameterNode and not self._parameterNode.inputVolume:
-            firstVolumeNode = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")
-            if firstVolumeNode: self._parameterNode.inputVolume = firstVolumeNode
-
-    def remove_parameter_node_observers(self):
-        if self._parameterNode:
-            if self._parameterNodeGuiTag:
-                self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
-                self._parameterNodeGuiTag = None
-            if self.hasObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply):
-                self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
-            if self.hasObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanPlanTrajectory):
-                self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanPlanTrajectory)
-
-    def setParameterNode(self, inputParameterNode: Optional[MamriParameterNode]) -> None:
-        self.remove_parameter_node_observers()
-        self._parameterNode = inputParameterNode
-        if self._parameterNode:
-            self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
-            self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
-            self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanPlanTrajectory)
-        self._checkCanApply()
-        self._checkCanPlanTrajectory()
-
-    def _checkCanApply(self, caller=None, event=None) -> None:
-        can_apply = self._parameterNode and self._parameterNode.inputVolume is not None
-        if hasattr(self.ui, "applyButton") and self.ui.applyButton:
-            self.ui.applyButton.enabled = can_apply
-            tooltip = _("Run fiducial detection and robot model rendering with IK.") if can_apply else _("Select an input volume node.")
-            self.ui.applyButton.toolTip = tooltip
-
-    # NEW: Updated to no longer require a segmentation node for planning.
-    def _checkCanPlanTrajectory(self, caller=None, event=None) -> None:
-        if not hasattr(self.ui, "planTrajectoryButton"):
-            return
-        
-        can_plan_base = (self._parameterNode and 
-                         self._parameterNode.targetFiducialNode and
-                         self._parameterNode.targetFiducialNode.GetNumberOfControlPoints() > 0 and
-                         self._parameterNode.entryPointFiducialNode and
-                         self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0)
-
-        model_is_built = self.logic and self.logic.jointTransformNodes.get("Baseplate") is not None
-        can_plan_total = can_plan_base and model_is_built
-        self.ui.planTrajectoryButton.enabled = bool(can_plan_total)
-        
-        tooltip = ""
-        if not model_is_built:
-            tooltip = _("Please run 'Start robot pose estimation' first to build the robot model.")
-        elif not can_plan_base:
-            tooltip = _("Select a target marker and an entry marker to enable planning.")
-        else:
-            tooltip = _("Calculate the robot joint angles to align the needle (Collision detection is OFF).")
-        self.ui.planTrajectoryButton.toolTip = tooltip
-
-    def onApplyButton(self) -> None:
-        if not self._parameterNode:
-            slicer.util.errorDisplay("Parameter node is not initialized."); return
-        self.logic.process(self._parameterNode)
-        self._checkCanPlanTrajectory()
-    
-    def onPlanTrajectoryButton(self) -> None:
-        if not self._parameterNode:
-            slicer.util.errorDisplay("Parameter node is not initialized."); return
-        self.logic.planTrajectory(self._parameterNode)
 
     def onSaveBaseplateButton(self) -> None:
         if not self.logic:
@@ -382,6 +244,10 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.jointModelNodes: Dict[str, vtkMRMLModelNode] = {}
         self.jointTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
         self.jointFixedOffsetTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
+        
+        # Default visibility states
+        self.models_visible = True
+        self.markers_visible = True
 
         self.robot_definition = self._define_robot_structure()
         self.robot_definition_dict = {joint["name"]: joint for joint in self.robot_definition}
@@ -452,7 +318,10 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         while node := slicer.mrmlScene.GetFirstNodeByName(name):
             slicer.mrmlScene.RemoveNode(node)
 
-    def process(self, parameterNode: MamriParameterNode) -> None:
+    def process(self, parameterNode: MamriParameterNode, models_visible: bool, markers_visible: bool) -> None:
+        self.models_visible = models_visible
+        self.markers_visible = markers_visible
+        
         with slicer.util.MessageDialog("Processing...", "Detecting fiducials and building robot model...") as dialog:
             slicer.app.processEvents()
             self._cleanup_module_nodes()
@@ -494,7 +363,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 self._solve_all_ik_chains(identified_joints_data)
             logging.info("Mamri processing finished.")
 
-    # NEW: This function calculates and sets the optimal entry point.
     def findAndSetEntryPoint(self, pNode: 'MamriParameterNode') -> None:
         """
         Finds the point on the body segmentation surface closest to the target marker
@@ -538,7 +406,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         cell_locator.BuildLocator()
 
         closest_point_coords = [0.0, 0.0, 0.0]
-        # vtk.mutable is used to allow the C++ function to modify these Python variables
         cell_id = vtk.mutable(0)
         sub_id = vtk.mutable(0)
         dist2 = vtk.mutable(0.0)
@@ -767,6 +634,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         tf_model_to_world = vtk.vtkMatrix4x4(); joint_art_node.GetMatrixTransformToWorld(tf_model_to_world)
         debug_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", debug_node_name)
         if disp := debug_node.GetDisplayNode():
+            disp.SetVisibility(self.markers_visible)
             disp.SetGlyphScale(3.0); disp.SetTextScale(3.5); r,g,b = joint_def.get("color", (0.1,0.8,0.8))
             disp.SetSelectedColor(r*0.7, g*0.7, b*0.7); disp.SetColor(r,g,b); disp.SetOpacity(0)
         prefix = "".join(w[0] for w in joint_name.split() if w)[:3].upper()
@@ -829,7 +697,9 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         tf_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", f"{jn}ArticulationTransform")
         tf_node.SetMatrixTransformToParent(tf_mat); self.jointTransformNodes[jn] = tf_node
         model.SetAndObserveTransformNodeID(tf_node.GetID())
-        if disp := model.GetDisplayNode(): disp.SetVisibility(True); disp.SetColor(color or (0.7,0.7,0.7)); disp.SetOpacity(0.85)
+        if disp := model.GetDisplayNode():
+            disp.SetVisibility(self.models_visible)
+            disp.SetColor(color or (0.7,0.7,0.7)); disp.SetOpacity(0.85)
         return tf_node
 
     def _handle_joint_detection_results(self, identified_joints_data: Dict[str, List[Dict]]):
@@ -843,6 +713,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 logging.info(f"Adjusted Baseplate fiducial Y-coords to {avg_y:.2f}")
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"{jn}Fiducials")
             if disp := node.GetDisplayNode():
+                disp.SetVisibility(self.markers_visible)
                 disp.SetGlyphScale(2.5); disp.SetTextScale(3.0); disp.SetColor(config.get("color", (0.8,0.8,0.2))); disp.SetSelectedColor(config.get("color", (0.8,0.8,0.2)))
             for i, m in enumerate(markers):
                 idx = node.AddControlPoint(m["ras_coords"]); node.SetNthControlPointLabel(idx, f"{jn}_M{i+1}")
@@ -908,8 +779,18 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(tempLabelmapNode, segmentationNode):
             logging.error("Failed to import labelmap into segmentation node."); slicer.mrmlScene.RemoveNode(segmentationNode); return
         slicer.mrmlScene.RemoveNode(tempLabelmapNode)
+        
         if segmentationNode.GetSegmentation().GetNumberOfSegments() > 0:
-            segment = segmentationNode.GetSegmentation().GetNthSegment(0); segment.SetName("Body"); segment.SetColor([0.8, 0.2, 0.2])
+            segment = segmentationNode.GetSegmentation().GetNthSegment(0)
+            segment.SetName("Body")
+            segment.SetColor([0.8, 0.2, 0.2])
+            
+            segmentation = segmentationNode.GetSegmentation()
+            closedSurfaceRepresentationName = slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
+            logging.info(f"Generating '{closedSurfaceRepresentationName}' representation for 'Body' segment...")
+            segmentation.CreateRepresentation(closedSurfaceRepresentationName)
+            logging.info("...representation generation complete. ✅")
+
         segmentationNode.CreateDefaultDisplayNodes()
         if dispNode := segmentationNode.GetDisplayNode(): dispNode.SetOpacity(0.75); dispNode.SetVisibility3D(True)
         pNode.segmentationNode = segmentationNode; logging.info(f"Successfully created and selected 'AutoBodySegmentation'.")
