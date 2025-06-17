@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>724</width>
-    <height>700</height>
+    <width>726</width>
+    <height>705</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
@@ -17,6 +17,46 @@
       <string>Pose estimation</string>
      </property>
      <layout class="QGridLayout" name="gridLayout">
+      <item row="2" column="1">
+       <widget class="ctkCheckBox" name="useSavedBaseplateCheckBox">
+        <property name="toolTip">
+         <string>If checked, use the previously saved baseplate transform instead of detecting it from the current scan.</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>useSavedBaseplate</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="label_useSavedBaseplate">
+        <property name="text">
+         <string>Use Saved Baseplate:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="2">
+       <widget class="QPushButton" name="saveBaseplateButton">
+        <property name="toolTip">
+         <string>Saves the current Baseplate transform for later use. Requires the Baseplate to be detected and processed in the current scan.</string>
+        </property>
+        <property name="text">
+         <string>Save Baseplate Transform</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0" colspan="3">
+       <widget class="QPushButton" name="applyButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Run the algorithm.</string>
+        </property>
+        <property name="text">
+         <string>Start robot pose estimation</string>
+        </property>
+       </widget>
+      </item>
       <item row="0" column="1" colspan="2">
        <widget class="qMRMLNodeComboBox" name="inputSelector">
         <property name="sizePolicy">
@@ -47,38 +87,6 @@
         </property>
        </widget>
       </item>
-      <item row="1" column="1" colspan="2">
-       <widget class="qMRMLSliderWidget" name="intensityThreshold">
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-          <horstretch>0</horstretch>
-          <verstretch>0</verstretch>
-         </sizepolicy>
-        </property>
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>1000.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>65.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>intensityThreshold</string>
-        </property>
-       </widget>
-      </item>
-      <item row="5" column="0">
-       <widget class="QLabel" name="label_distanceTolerance">
-        <property name="text">
-         <string>Tolerance (mm):</string>
-        </property>
-       </widget>
-      </item>
       <item row="0" column="0">
        <widget class="QLabel" name="label_inputSelector">
         <property name="text">
@@ -86,95 +94,7 @@
         </property>
        </widget>
       </item>
-      <item row="2" column="0">
-       <widget class="QLabel" name="label_minVolumeThreshold">
-        <property name="text">
-         <string>Min. Volume (mm³):</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="label_intensityThreshold">
-        <property name="text">
-         <string>Intensity Threshold:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="5" column="2">
-       <widget class="qMRMLSpinBox" name="tolerance">
-        <property name="maximum">
-         <double>10.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>3.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>distance_tolerance</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="0">
-       <widget class="QLabel" name="label_maxVolumeThreshold">
-        <property name="text">
-         <string>Max. Volume (mm³):</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="1" colspan="2">
-       <widget class="qMRMLSliderWidget" name="minVolumeThreshold">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>10000.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>150.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>minVolumeThreshold</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="1" colspan="2">
-       <widget class="qMRMLSliderWidget" name="maxVolumeThreshold">
-        <property name="decimals">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <double>10000.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>1500.000000000000000</double>
-        </property>
-        <property name="quantity">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>maxVolumeThreshold</string>
-        </property>
-       </widget>
-      </item>
-      <item row="7" column="0" colspan="3">
-       <widget class="QPushButton" name="applyButton">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="toolTip">
-         <string>Run the algorithm.</string>
-        </property>
-        <property name="text">
-         <string>Start robot pose estimation</string>
-        </property>
-       </widget>
-      </item>
-      <item row="8" column="0" colspan="3">
+      <item row="4" column="0" colspan="3">
        <widget class="QWidget" name="widget" native="true">
         <layout class="QGridLayout" name="gridLayout_2">
          <item row="0" column="0">
@@ -217,33 +137,6 @@
         </layout>
        </widget>
       </item>
-      <item row="6" column="0">
-       <widget class="QLabel" name="label_useSavedBaseplate">
-        <property name="text">
-         <string>Use Saved Baseplate:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="6" column="1">
-       <widget class="ctkCheckBox" name="useSavedBaseplateCheckBox">
-        <property name="toolTip">
-         <string>If checked, use the previously saved baseplate transform instead of detecting it from the current scan.</string>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>useSavedBaseplate</string>
-        </property>
-       </widget>
-      </item>
-      <item row="6" column="2">
-       <widget class="QPushButton" name="saveBaseplateButton">
-        <property name="toolTip">
-         <string>Saves the current Baseplate transform for later use. Requires the Baseplate to be detected and processed in the current scan.</string>
-        </property>
-        <property name="text">
-         <string>Save Baseplate Transform</string>
-        </property>
-       </widget>
-      </item>
      </layout>
     </widget>
    </item>
@@ -253,35 +146,14 @@
       <string>Trajectory Planning</string>
      </property>
      <layout class="QGridLayout" name="gridLayout_3">
-      <item row="6" column="0" colspan="4">
-       <widget class="QPushButton" name="planTrajectoryButton">
+      <item row="4" column="1">
+       <widget class="QLabel" name="label_4">
         <property name="text">
-         <string>Start robot trajectory planning</string>
-        </property>
-        <property name="checkable">
-         <bool>false</bool>
+         <string>Target segment:</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="3">
-       <widget class="qMRMLNodeComboBox" name="segmentationNode">
-        <property name="nodeTypes">
-         <stringlist notr="true">
-          <string>vtkMRMLSegmentationNode</string>
-         </stringlist>
-        </property>
-        <property name="hideChildNodeTypes">
-         <stringlist notr="true"/>
-        </property>
-        <property name="interactionNodeSingletonTag">
-         <string notr="true"/>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>segmentationNode</string>
-        </property>
-       </widget>
-      </item>
-      <item row="5" column="1">
+      <item row="6" column="1">
        <widget class="QLabel" name="label_5">
         <property name="text">
          <string>Safety distance:</string>
@@ -315,21 +187,35 @@
         </property>
        </widget>
       </item>
-      <item row="3" column="1">
-       <widget class="QLabel" name="label_4">
+      <item row="2" column="0" colspan="4">
+       <widget class="QPushButton" name="findEntryPointButton">
+        <property name="toolTip">
+         <string>Automatically find the point on the patient's skin closest to the target marker and set it as the Entry Point.</string>
+        </property>
         <property name="text">
-         <string>Target segment:</string>
+         <string>Find Optimal Entry Point</string>
         </property>
        </widget>
       </item>
-      <item row="0" column="1">
-       <widget class="QLabel" name="label">
-        <property name="text">
-         <string>Target marker:</string>
+      <item row="4" column="3">
+       <widget class="qMRMLNodeComboBox" name="segmentationNode">
+        <property name="nodeTypes">
+         <stringlist notr="true">
+          <string>vtkMRMLSegmentationNode</string>
+         </stringlist>
+        </property>
+        <property name="hideChildNodeTypes">
+         <stringlist notr="true"/>
+        </property>
+        <property name="interactionNodeSingletonTag">
+         <string notr="true"/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>segmentationNode</string>
         </property>
        </widget>
       </item>
-      <item row="5" column="3">
+      <item row="6" column="3">
        <widget class="qMRMLSpinBox" name="MRMLSpinBox">
         <property name="decimals">
          <number>0</number>
@@ -348,14 +234,31 @@
         </property>
        </widget>
       </item>
-      <item row="1" column="1">
+      <item row="0" column="1">
+       <widget class="QLabel" name="label">
+        <property name="text">
+         <string>Target marker:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="0" colspan="4">
+       <widget class="QPushButton" name="planTrajectoryButton">
+        <property name="text">
+         <string>Start robot trajectory planning</string>
+        </property>
+        <property name="checkable">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
        <widget class="QLabel" name="label_6">
         <property name="text">
          <string>Entry marker:</string>
         </property>
        </widget>
       </item>
-      <item row="1" column="3">
+      <item row="3" column="3">
        <widget class="qMRMLNodeComboBox" name="entryPointFiducialNodeComboBox">
         <property name="nodeTypes">
          <stringlist notr="true">
@@ -370,16 +273,6 @@
         </property>
         <property name="SlicerParameterName" stdset="0">
          <string>entryPointFiducialNode</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="0" colspan="4">
-       <widget class="QPushButton" name="findEntryPointButton">
-        <property name="toolTip">
-         <string>Automatically find the point on the patient's skin closest to the target marker and set it as the Entry Point.</string>
-        </property>
-        <property name="text">
-         <string>Find Optimal Entry Point</string>
         </property>
        </widget>
       </item>
@@ -419,19 +312,9 @@
    <header>ctkDoubleSpinBox.h</header>
   </customwidget>
   <customwidget>
-   <class>ctkSliderWidget</class>
-   <extends>QWidget</extends>
-   <header>ctkSliderWidget.h</header>
-  </customwidget>
-  <customwidget>
    <class>qMRMLNodeComboBox</class>
    <extends>QWidget</extends>
    <header>qMRMLNodeComboBox.h</header>
-  </customwidget>
-  <customwidget>
-   <class>qMRMLSliderWidget</class>
-   <extends>ctkSliderWidget</extends>
-   <header>qMRMLSliderWidget.h</header>
   </customwidget>
   <customwidget>
    <class>qMRMLSpinBox</class>

@@ -53,10 +53,6 @@ and renders the MAMRI robot model and estimates joint angles.""")
 @parameterNodeWrapper
 class MamriParameterNode:
     inputVolume: vtkMRMLScalarVolumeNode
-    intensityThreshold: Annotated[float, WithinRange(0.0, 5000.0)] = 65.0
-    minVolumeThreshold: Annotated[float, WithinRange(0.0, 10000.0)] = 150.0
-    maxVolumeThreshold: Annotated[float, WithinRange(0.0, 10000.0)] = 1500.0
-    distance_tolerance: Annotated[float, WithinRange(0.0, 10.0)] = 3.0
     useSavedBaseplate: bool = False
 
     segmentationNode: vtkMRMLSegmentationNode
@@ -136,9 +132,21 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def initializeParameterNode(self) -> None:
         self.logic = self.logic or MamriLogic()
         self.setParameterNode(self.logic.getParameterNode())
-        if self._parameterNode and not self._parameterNode.inputVolume:
+        
+        if not self._parameterNode:
+            return
+
+        if not self._parameterNode.inputVolume:
             firstVolumeNode = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")
-            if firstVolumeNode: self._parameterNode.inputVolume = firstVolumeNode
+            if firstVolumeNode:
+                self._parameterNode.inputVolume = firstVolumeNode
+        
+        if not self._parameterNode.targetFiducialNode:
+            targetNode = slicer.mrmlScene.GetFirstNodeByName("Target")
+            if targetNode and isinstance(targetNode, slicer.vtkMRMLMarkupsFiducialNode):
+                self._parameterNode.targetFiducialNode = targetNode
+                logging.info("Automatically selected 'Target' fiducial node.")
+
 
     def remove_parameter_node_observers(self):
         if self._parameterNode:
@@ -195,11 +203,9 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay("Parameter node is not initialized.")
             return
         
-        # Get the state of the visibility checkboxes
         models_visible = self.ui.drawModelsCheckBox.isChecked() if hasattr(self.ui, "drawModelsCheckBox") else True
         markers_visible = self.ui.drawFiducialsCheckBox.isChecked() if hasattr(self.ui, "drawFiducialsCheckBox") else True
         
-        # Pass the visibility states to the logic
         self.logic.process(self._parameterNode, models_visible=models_visible, markers_visible=markers_visible)
         self._checkCanPlanTrajectory()
     
@@ -245,7 +251,11 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.jointTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
         self.jointFixedOffsetTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
         
-        # Default visibility states
+        self.INTENSITY_THRESHOLD = 65.0
+        self.MIN_VOLUME_THRESHOLD = 150.0
+        self.MAX_VOLUME_THRESHOLD = 1500.0
+        self.DISTANCE_TOLERANCE = 3.0
+
         self.models_visible = True
         self.markers_visible = True
 
@@ -308,7 +318,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "parent": "Link2", "fixed_offset_to_parent": self._create_offset_matrix((0, 20, 60)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
             {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, -55, 0)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 30), (10, 22.5, 30), (-10, -22.5, 30)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
             {"name": "EndEffectorHolder", "stl_path": os.path.join(base_path, "EndEffectorHolder.STL"), "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 35)), "has_markers": False, "color": (0, 1, 0), "articulation_axis": None},
-            {"name": "NeedleHolder", "stl_path": os.path.join(base_path, "NeedleHolder.STL"), "parent": "EndEffectorHolder", "fixed_offset_to_parent": self._create_offset_matrix((-80, 0, 26.05)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0), "joint_limits": (0, 0)}
+            {"name": "Needle", "stl_path": os.path.join(base_path, "Needle.STL"), "parent": "EndEffectorHolder", "fixed_offset_to_parent": self._create_offset_matrix((-50, 0, 43)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "joint_limits": (0, 0), "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0)}
         ]
 
     def getParameterNode(self) -> MamriParameterNode:
@@ -364,23 +374,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             logging.info("Mamri processing finished.")
 
     def findAndSetEntryPoint(self, pNode: 'MamriParameterNode') -> None:
-        """
-        Finds the point on the body segmentation surface closest to the target marker
-        and sets it as the entry point.
-        """
         targetNode = pNode.targetFiducialNode
         segmentationNode = pNode.segmentationNode
-        entryNode = pNode.entryPointFiducialNode
 
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and segmentationNode):
             slicer.util.errorDisplay("Please select a body segmentation and place a target marker first.")
             return
 
-        if not entryNode:
-            entryNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "OptimalEntryPoint")
-            entryNode.GetDisplayNode().SetSelectedColor(1.0, 1.0, 0.0) # Yellow
-            pNode.entryPointFiducialNode = entryNode
-        
         body_poly = vtk.vtkPolyData()
         segmentation = segmentationNode.GetSegmentation()
         bodySegmentID = next((segmentation.GetSegmentIdBySegmentName(s.GetName()) for i in range(segmentation.GetNumberOfSegments()) if (s := segmentation.GetNthSegment(i)) and "Body" in s.GetName()), None)
@@ -399,38 +399,74 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             slicer.util.errorDisplay("The 'Body' segment is empty. Cannot find the closest point.")
             return
 
-        target_pos = targetNode.GetNthControlPointPositionWorld(0)
+        normals = vtk.vtkPolyDataNormals()
+        normals.SetInputData(body_poly)
+        normals.ComputePointNormalsOn()
+        normals.SplittingOff()
+        normals.Update()
+        polydata_with_normals = normals.GetOutput()
+        point_normals_array = polydata_with_normals.GetPointData().GetNormals()
 
-        cell_locator = vtk.vtkCellLocator()
-        cell_locator.SetDataSet(body_poly)
-        cell_locator.BuildLocator()
-
-        closest_point_coords = [0.0, 0.0, 0.0]
-        cell_id = vtk.mutable(0)
-        sub_id = vtk.mutable(0)
-        dist2 = vtk.mutable(0.0)
-
-        cell_locator.FindClosestPoint(target_pos, closest_point_coords, cell_id, sub_id, dist2)
-
-        entryNode.RemoveAllControlPoints()
-        entryNode.AddControlPointWorld(vtk.vtkVector3d(closest_point_coords))
-        entryNode.SetNthControlPointLabel(0, "Optimal Entry")
+        point_locator = vtk.vtkStaticPointLocator()
+        point_locator.SetDataSet(polydata_with_normals)
+        point_locator.BuildLocator()
         
-        logging.info(f"Found optimal entry point at {closest_point_coords}. Distance to target: {math.sqrt(dist2):.2f} mm")
-        slicer.util.infoDisplay("Optimal entry point has been calculated and set.")
+        target_pos = targetNode.GetNthControlPointPositionWorld(0)
+        result_point_ids = vtk.vtkIdList()
+        
+        search_radius = 80.0
+        logging.info(f"Searching for accessible entry points within a {search_radius}mm radius of the target.")
+        point_locator.FindPointsWithinRadius(search_radius, target_pos, result_point_ids)
+
+        up_vector = np.array([0, 1, 0])
+        normal_threshold = -0.34 # Corresponds to ~110 degrees from the 'up' vector
+        
+        candidate_points = []
+        for i in range(result_point_ids.GetNumberOfIds()):
+            point_id = result_point_ids.GetId(i)
+            point_normal = np.array(point_normals_array.GetTuple(point_id))
+            
+            if np.dot(point_normal, up_vector) > normal_threshold:
+                point_coords = np.array(polydata_with_normals.GetPoint(point_id))
+                distance = np.linalg.norm(point_coords - np.array(target_pos))
+                candidate_points.append({"coords": point_coords, "distance": distance})
+
+        if not candidate_points:
+            slicer.util.warningDisplay(f"Could not find a suitable entry point on an accessible surface within a {search_radius}mm radius of the target. Please ensure the target is placed correctly.")
+            return
+        
+        best_candidate = min(candidate_points, key=lambda x: x["distance"])
+        closest_point_coords = best_candidate["coords"]
+
+        optimalEntryPointNodeName = "OptimalEntryPoint"
+        if oldEntryNode := slicer.mrmlScene.GetFirstNodeByName(optimalEntryPointNodeName):
+            slicer.mrmlScene.RemoveNode(oldEntryNode)
+
+        entryNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", optimalEntryPointNodeName)
+        entryNode.GetDisplayNode().SetSelectedColor(1.0, 1.0, 0.0)
+
+        entryNode.AddControlPointWorld(vtk.vtkVector3d(closest_point_coords))
+        entryNode.SetNthControlPointLabel(0, "Optimal Entry (Accessible)")
+
+        pNode.entryPointFiducialNode = entryNode
+        
+        logging.info(f"Found accessible optimal entry point at {closest_point_coords}. Distance to target: {best_candidate['distance']:.2f} mm")
+        slicer.util.infoDisplay("Accessible optimal entry point has been calculated and set.")
 
     def planTrajectory(self, pNode: MamriParameterNode) -> None:
-        logging.info("Starting trajectory planning for needle alignment (NO collision detection)...")
+        logging.info("Starting trajectory planning for needle alignment...")
         targetNode = pNode.targetFiducialNode
         entryNode = pNode.entryPointFiducialNode
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and entryNode and entryNode.GetNumberOfControlPoints() > 0):
-            slicer.util.errorDisplay("Set a target marker and an entry marker to plan trajectory."); return
+            slicer.util.errorDisplay("Set a target marker and an entry marker to plan trajectory.")
+            return
 
         target_pos = np.array(targetNode.GetNthControlPointPositionWorld(0))
         entry_pos = np.array(entryNode.GetNthControlPointPositionWorld(0))
         direction_vec = target_pos - entry_pos
         if np.linalg.norm(direction_vec) < 1e-6:
-            slicer.util.errorDisplay("Entry and Target markers are at the same position."); return
+            slicer.util.errorDisplay("Entry and Target markers are at the same position.")
+            return
         x_axis = direction_vec / np.linalg.norm(direction_vec)
         needle_tip_pos = entry_pos - (pNode.safetyDistance * x_axis)
         
@@ -451,50 +487,84 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
         base_node = self.jointTransformNodes.get("Baseplate")
         if not base_node:
-            slicer.util.errorDisplay("Cannot plan trajectory: Robot model is not loaded or baseplate is missing."); return
+            slicer.util.errorDisplay("Cannot plan trajectory: Robot model is not loaded or baseplate is missing.")
+            return
         base_transform_vtk = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(base_transform_vtk)
 
-        initial_guess = self._get_current_joint_angles(articulated_chain)
+        initial_guesses = [
+            self._get_current_joint_angles(articulated_chain),
+            [0.0] * len(articulated_chain),
+            [math.radians(a) for a in [0, 30, 30, 0, 0, 0]],
+            [math.radians(a) for a in [0, -30, -30, 0, 0, 0]]
+        ]
+
+        best_result = None
+        lowest_error = float('inf')
+
+        logging.info("Solving IK for the target needle pose with multiple initial guesses...")
+        for i, initial_guess in enumerate(initial_guesses):
+            logging.info(f"  - Trying initial guess #{i+1}...")
+            with slicer.util.MessageDialog(f"Planning Trajectory (Attempt {i+1}/{len(initial_guesses)})", "Solving inverse kinematics...") as dialog:
+                slicer.app.processEvents()
+                try:
+                    result = scipy.optimize.least_squares(
+                        self._ik_pose_error_function, initial_guess, bounds=(bounds_lower, bounds_upper),
+                        args=(articulated_chain, target_transform_vtk, base_transform_vtk),
+                        method='trf', ftol=1e-4, xtol=1e-4, verbose=0)
+                except Exception as e:
+                    logging.warning(f"IK optimization for guess #{i+1} failed with an exception: {e}")
+                    continue
+
+            final_error = np.linalg.norm(result.fun)
+            logging.info(f"    > Guess #{i+1} finished with error: {final_error:.4f}")
+
+            if result.success and final_error < 1.0:
+                logging.info(f"Found a good solution with error {final_error:.4f}. Using this result.")
+                best_result = result
+                break
+
+            if final_error < lowest_error:
+                lowest_error = final_error
+                best_result = result
+
+        if best_result is None:
+            slicer.util.errorDisplay("IK optimization failed for all initial guesses.")
+            return
         
-        logging.info("Solving IK for the target needle pose...")
-        with slicer.util.MessageDialog("Planning Trajectory", "Solving inverse kinematics...") as dialog:
-            slicer.app.processEvents()
-            try:
-                result = scipy.optimize.least_squares(
-                    self._ik_pose_error_function, initial_guess, bounds=(bounds_lower, bounds_upper),
-                    args=(articulated_chain, target_transform_vtk, base_transform_vtk),
-                    method='trf', ftol=1e-4, xtol=1e-4, verbose=0)
-            except Exception as e:
-                slicer.util.errorDisplay(f"IK optimization failed with an exception: {e}"); return
-        
-        logging.info(f"Applying IK solution angles (Error: {np.linalg.norm(result.fun):.2f}):")
+        final_error = np.linalg.norm(best_result.fun)
+        logging.info(f"Applying best IK solution found (Error: {final_error:.2f}):")
         for i, name in enumerate(articulated_chain):
-            angle_deg = math.degrees(result.x[i])
+            angle_deg = math.degrees(best_result.x[i])
             logging.info(f"  - {name}: {angle_deg:.2f}°")
             if tf_node := self.jointTransformNodes.get(name):
                 tf_node.SetMatrixTransformToParent(self._get_rotation_transform(angle_deg, self.robot_definition_dict[name].get("articulation_axis")).GetMatrix())
         
-        if needle_holder_tf := self.jointTransformNodes.get("NeedleHolder"):
-            needle_holder_tf.SetMatrixTransformToParent(vtk.vtkMatrix4x4())
+        if needle_tf := self.jointTransformNodes.get("Needle"):
+            needle_tf.SetMatrixTransformToParent(vtk.vtkMatrix4x4())
 
-        final_error = np.linalg.norm(result.fun)
-        if not result.success or final_error > 1.0:
+        if not best_result.success or final_error > 1.0:
             slicer.util.warningDisplay(f"IK solution has high error: {final_error:.2f}. The robot may not be perfectly aligned, but the closest solution was applied.")
         else:
             slicer.util.infoDisplay(f"Trajectory planned successfully. Final error: {final_error:.2f}.")
 
     def _ik_pose_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform):
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
-        fk_transform = self._get_world_transform_for_joint(joint_values_rad, "NeedleHolder", base_transform)
-        if fk_transform is None: return [1e6] * 9
+        fk_transform = self._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform)
+        if fk_transform is None:
+            return [1e6] * 6 
+
         fk_mat = np.array([fk_transform.GetElement(i, j) for i in range(4) for j in range(4)]).reshape(4, 4)
         target_mat = np.array([target_transform.GetElement(i, j) for i in range(4) for j in range(4)]).reshape(4, 4)
+        
         pos_error = fk_mat[:3, 3] - target_mat[:3, 3]
-        fk_x_axis = fk_mat[:3, 0]; fk_y_axis = fk_mat[:3, 1]
-        target_x_axis = target_mat[:3, 0]; target_y_axis = target_mat[:3, 1]
-        orientation_error_x = 50 * np.cross(fk_x_axis, target_x_axis)
-        orientation_error_y = 50 * np.cross(fk_y_axis, target_y_axis)
-        return np.concatenate((pos_error, orientation_error_x, orientation_error_y)).tolist()
+        
+        fk_x_axis = fk_mat[:3, 0]
+        target_x_axis = target_mat[:3, 0]
+        
+        actual_needle_direction = -fk_x_axis
+        orientation_error = 50 * (target_x_axis - actual_needle_direction)
+        
+        return np.concatenate((pos_error, orientation_error)).tolist()
         
     def _build_robot_model(self, baseplate_transform_matrix: vtk.vtkMatrix4x4):
         for joint_info in self.robot_definition:
@@ -692,14 +762,26 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         tf.SetModeToRigidBody(); tf.Update(); return tf.GetMatrix()
 
     def _create_model_and_articulation_transform(self, jn: str, stl: str, tf_mat: vtk.vtkMatrix4x4, color) -> Optional[vtkMRMLLinearTransformNode]:
-        try: model = loadModel(stl); model.SetName(f"{jn}Model"); self.jointModelNodes[jn] = model
-        except Exception as e: logging.error(f"Failed to load STL '{stl}' for {jn}: {e}"); return None
+        try:
+            model = loadModel(stl)
+            model.SetName(f"{jn}Model")
+            self.jointModelNodes[jn] = model
+        except Exception as e:
+            logging.error(f"Failed to load STL '{stl}' for {jn}: {e}")
+            return None
+            
         tf_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", f"{jn}ArticulationTransform")
-        tf_node.SetMatrixTransformToParent(tf_mat); self.jointTransformNodes[jn] = tf_node
+        tf_node.SetMatrixTransformToParent(tf_mat)
+        self.jointTransformNodes[jn] = tf_node
         model.SetAndObserveTransformNodeID(tf_node.GetID())
+        
         if disp := model.GetDisplayNode():
             disp.SetVisibility(self.models_visible)
-            disp.SetColor(color or (0.7,0.7,0.7)); disp.SetOpacity(0.85)
+            node_color = color or (0.7, 0.7, 0.7)
+            disp.SetColor(node_color)
+            disp.SetOpacity(0.85)
+            disp.SetSelectedColor(node_color)
+            
         return tf_node
 
     def _handle_joint_detection_results(self, identified_joints_data: Dict[str, List[Dict]]):
@@ -726,8 +808,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         for i in range(3):
             corner, p1, p2 = points[i], points[(i+1)%3], points[(i+2)%3]
             d1, d2 = math.dist(corner['ras'], p1['ras']), math.dist(corner['ras'], p2['ras'])
-            if abs(d1 - l_short) <= tol and abs(d2 - l_long) <= tol: return [corner['data'], p1['data'], p2['data']]
-            if abs(d1 - l_long) <= tol and abs(d2 - l_short) <= tol: return [corner['data'], p2['data'], p1['data']]
+            if abs(d1 - l_short) <= self.DISTANCE_TOLERANCE and abs(d2 - l_long) <= self.DISTANCE_TOLERANCE: return [corner['data'], p1['data'], p2['data']]
+            if abs(d1 - l_long) <= self.DISTANCE_TOLERANCE and abs(d2 - l_short) <= self.DISTANCE_TOLERANCE: return [corner['data'], p2['data'], p1['data']]
         return None
 
     def joint_detection(self, pNode: 'MamriParameterNode') -> Dict[str, List[Dict]]:
@@ -744,9 +826,9 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             if len(available) < 3: continue
             for combo in itertools.combinations(available, 3):
                 pts = [c["ras_coords"] for c in combo]; dists = sorted([math.dist(pts[0], pts[1]), math.dist(pts[0], pts[2]), math.dist(pts[1], pts[2])])
-                if all(abs(d - e) <= pNode.distance_tolerance for d, e in zip(dists, expected_dists)):
+                if all(abs(d - e) <= self.DISTANCE_TOLERANCE for d, e in zip(dists, expected_dists)):
                     matched_data = [dict(c) for c in combo]
-                    sorted_data = self._sort_l_shaped_markers(matched_data, l1, l2, pNode.distance_tolerance)
+                    sorted_data = self._sort_l_shaped_markers(matched_data, l1, l2, self.DISTANCE_TOLERANCE)
                     identified[jn] = sorted_data if sorted_data else matched_data
                     used_ids.update(c["id"] for c in combo); logging.info(f"Identified '{jn}' (IDs: {[c['id'] for c in combo]}). Sorted: {bool(sorted_data)}"); break 
             else: logging.info(f"No suitable combo found for '{jn}'.")
@@ -755,9 +837,9 @@ class MamriLogic(ScriptedLoadableModuleLogic):
     def volume_threshold_segmentation(self, pNode: 'MamriParameterNode') -> None:
         try: sitk_img = sitkUtils.PullVolumeFromSlicer(pNode.inputVolume)
         except Exception as e: logging.error(f"Failed to pull volume: {e}"); return
-        binary = sitk.BinaryThreshold(sitk_img, pNode.intensityThreshold, 65535); closed = sitk.BinaryMorphologicalClosing(binary, [2] * 3, sitk.sitkBall)
+        binary = sitk.BinaryThreshold(sitk_img, self.INTENSITY_THRESHOLD, 65535); closed = sitk.BinaryMorphologicalClosing(binary, [2] * 3, sitk.sitkBall)
         labeled = sitk.ConnectedComponent(closed); stats = sitk.LabelShapeStatisticsImageFilter(); stats.Execute(labeled)
-        fiducials_data = [{"vol": stats.GetPhysicalSize(lbl), "centroid": stats.GetCentroid(lbl), "id": lbl} for lbl in stats.GetLabels() if pNode.minVolumeThreshold <= stats.GetPhysicalSize(lbl) <= pNode.maxVolumeThreshold]
+        fiducials_data = [{"vol": stats.GetPhysicalSize(lbl), "centroid": stats.GetCentroid(lbl), "id": lbl} for lbl in stats.GetLabels() if self.MIN_VOLUME_THRESHOLD <= stats.GetPhysicalSize(lbl) <= self.MAX_VOLUME_THRESHOLD]
         self._clear_node_by_name("DetectedFiducials")
         if fiducials_data:
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "DetectedFiducials")
@@ -814,10 +896,12 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         marker_names = set()
         for jc in self.robot_definition:
             if jc.get("has_markers"):
-                marker_names.add(f"{jc['name']}Fiducials"); marker_names.add(f"{jc['name']}_LocalMarkers_WorldView_DEBUG")
+                marker_names.add(f"{jc['name']}Fiducials")
+        
         for name in marker_names:
             if node := slicer.mrmlScene.GetFirstNodeByName(name):
-                if disp := node.GetDisplayNode(): disp.SetVisibility(checked)
+                if disp := node.GetDisplayNode():
+                    disp.SetVisibility(checked)
     
     def _toggle_robot_models(self, checked: bool):
         for model_node in self.jointModelNodes.values():
