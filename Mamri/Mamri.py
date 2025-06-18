@@ -141,9 +141,9 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if firstVolumeNode:
                 self._parameterNode.inputVolume = firstVolumeNode
         
-        if not self._parameterNode.targetFiducialNode:
-            targetNode = slicer.mrmlScene.GetFirstNodeByName("Target")
-            if targetNode and isinstance(targetNode, slicer.vtkMRMLMarkupsFiducialNode):
+        targetNode = slicer.mrmlScene.GetFirstNodeByName("Target")
+        if targetNode and isinstance(targetNode, slicer.vtkMRMLMarkupsFiducialNode):
+            if self._parameterNode.targetFiducialNode != targetNode:
                 self._parameterNode.targetFiducialNode = targetNode
                 logging.info("Automatically selected 'Target' fiducial node.")
 
@@ -178,25 +178,29 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _checkCanPlanTrajectory(self, caller=None, event=None) -> None:
         if not hasattr(self.ui, "planTrajectoryButton"):
             return
-        
-        can_plan_base = (self._parameterNode and 
+
+        can_plan_base = (self._parameterNode and
                          self._parameterNode.targetFiducialNode and
                          self._parameterNode.targetFiducialNode.GetNumberOfControlPoints() > 0 and
                          self._parameterNode.entryPointFiducialNode and
-                         self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0)
+                         self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0 and
+                         self._parameterNode.segmentationNode)
 
         model_is_built = self.logic and self.logic.jointTransformNodes.get("Baseplate") is not None
         can_plan_total = can_plan_base and model_is_built
         self.ui.planTrajectoryButton.enabled = bool(can_plan_total)
-        
+
         tooltip = ""
         if not model_is_built:
             tooltip = _("Please run 'Start robot pose estimation' first to build the robot model.")
-        elif not can_plan_base:
+        elif not self._parameterNode.segmentationNode:
+            tooltip = _("Select a body segmentation node to enable planning with collision detection.")
+        elif not (self._parameterNode.targetFiducialNode and self._parameterNode.entryPointFiducialNode):
             tooltip = _("Select a target marker and an entry marker to enable planning.")
         else:
-            tooltip = _("Calculate the robot joint angles to align the needle (Collision detection is OFF).")
+            tooltip = _("Calculate the robot joint angles to align the needle, with collision avoidance.")
         self.ui.planTrajectoryButton.toolTip = tooltip
+
 
     def onApplyButton(self) -> None:
         if not self._parameterNode:
@@ -250,6 +254,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.jointModelNodes: Dict[str, vtkMRMLModelNode] = {}
         self.jointTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
         self.jointFixedOffsetTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
+        self.jointCollisionPolys: Dict[str, vtk.vtkPolyData] = {}
         
         self.INTENSITY_THRESHOLD = 65.0
         self.MIN_VOLUME_THRESHOLD = 150.0
@@ -266,10 +271,14 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.TARGET_POSE_TRANSFORM_NODE_NAME = "MamriTargetPoseTransform_DEBUG"
         self.TRAJECTORY_LINE_NODE_NAME = "TrajectoryLine_DEBUG"
 
+        self.DEBUG_COLLISIONS = False 
+        if self.DEBUG_COLLISIONS:
+            logging.warning("MamriLogic collision debugging is enabled. This will create temporary models in the scene.")
+
         self.ik_chains_config = [
             {"parent_of_proximal": "Baseplate", "proximal": "Shoulder1", "distal_with_markers": "Link1", "log_name": "Shoulder1/Link1"},
             {"parent_of_proximal": "Link1", "proximal": "Shoulder2", "distal_with_markers": "Elbow1", "log_name": "Shoulder2/Elbow1"},
-            {"parent_of_proximal": "Link2", "proximal": "Wrist", "distal_with_markers": "End", "log_name": "Wrist/End"},
+            {"parent_of_proximal": "Elbow1", "proximal": "Wrist", "distal_with_markers": "End", "log_name": "Wrist/End"},
         ]
         
         self._discover_robot_nodes_in_scene()
@@ -308,17 +317,14 @@ class MamriLogic(ScriptedLoadableModuleLogic):
     def _define_robot_structure(self) -> List[Dict]:
         base_path = r"C:\Users\paul\Documents\UTwente\MSc ROB\MSc Thesis\CAD\Joints"
         return [
-            {"name": "Baseplate", "stl_path": os.path.join(base_path, "Baseplate.STL"), "parent": None, "fixed_offset_to_parent": None, "has_markers": True, "local_marker_coords": [(-10.0, 20.0, 5.0), (10.0, 20.0, 5.0), (-10.0, -20.0, 5.0)], "arm_lengths": (40.0, 20.0), "color": (1, 0, 0), "articulation_axis": None},
-            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
-            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
-            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
-            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, -35)), "has_markers": True, "local_marker_coords": [(10, 35.0, 120.0), (-10, 35.0, 120.0), (-10, -35.0, 120.0)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
-            {"name": "Link2", "stl_path": os.path.join(base_path, "Link2.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 35, 125)), "has_markers": False, "color": (0, 1, 0), "articulation_axis": None},
-            {"name": "Link3", "stl_path": os.path.join(base_path, "Link3.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, -45, 125)), "has_markers": False, "color": (0, 1, 0), "articulation_axis": None},
-            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "parent": "Link2", "fixed_offset_to_parent": self._create_offset_matrix((0, 20, 60)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
-            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, -55, 0)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 30), (10, 22.5, 30), (-10, -22.5, 30)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
-            {"name": "EndEffectorHolder", "stl_path": os.path.join(base_path, "EndEffectorHolder.STL"), "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 35)), "has_markers": False, "color": (0, 1, 0), "articulation_axis": None},
-            {"name": "Needle", "stl_path": os.path.join(base_path, "Needle.STL"), "parent": "EndEffectorHolder", "fixed_offset_to_parent": self._create_offset_matrix((-50, 0, 43)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "joint_limits": (0, 0), "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0)}
+            {"name": "Baseplate", "stl_path": os.path.join(base_path, "Baseplate.STL"), "collision_stl_path": os.path.join(base_path, "Baseplate_collision.STL"), "parent": None, "fixed_offset_to_parent": None, "has_markers": True, "local_marker_coords": [(-10.0, 20.0, 5.0), (10.0, 20.0, 5.0), (-10.0, -20.0, 5.0)], "arm_lengths": (40.0, 20.0), "color": (1, 0, 0), "articulation_axis": None},
+            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder1_collision.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
+            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "collision_stl_path": os.path.join(base_path, "Link1_collision.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
+            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder2_collision.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
+            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "collision_stl_path": os.path.join(base_path, "Elbow1_collision.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)), "has_markers": True, "local_marker_coords": [(10, 35.0, 85), (-10, 35.0, 85), (-10, -35.0, 85)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
+            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "collision_stl_path": os.path.join(base_path, "Wrist_collision.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
+            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "collision_stl_path": os.path.join(base_path, "End_collision.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 8)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 26), (10, 22.5, 26), (-10, -22.5, 26)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
+            {"name": "Needle", "stl_path": os.path.join(base_path, "Needle.STL"), "collision_stl_path": os.path.join(base_path, "Needle_collision.STL"), "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((-50, 0, 71)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "joint_limits": (0, 0), "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0)}
         ]
 
     def getParameterNode(self) -> MamriParameterNode:
@@ -373,6 +379,36 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 self._solve_all_ik_chains(identified_joints_data)
             logging.info("Mamri processing finished.")
 
+    def _get_body_polydata(self, segmentationNode: vtkMRMLSegmentationNode) -> Optional[vtk.vtkPolyData]:
+        """Extracts the 'Body' segment's polydata from a segmentation node."""
+        if not segmentationNode:
+            logging.warning("No segmentation node provided to get body polydata.")
+            return None
+
+        segmentation = segmentationNode.GetSegmentation()
+        bodySegmentID = next((segmentation.GetSegmentIdBySegmentName(s.GetName()) for i in range(segmentation.GetNumberOfSegments()) if (s := segmentation.GetNthSegment(i)) and "Body" in s.GetName()), None)
+
+        if not bodySegmentID:
+            slicer.util.errorDisplay("Could not find a segment named 'Body' in the selected segmentation.")
+            return None
+
+        body_poly = vtk.vtkPolyData()
+        try:
+            representationName = slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
+            if not segmentation.ContainsRepresentation(representationName):
+                logging.info(f"Creating '{representationName}' for segmentation...")
+                segmentation.CreateRepresentation(representationName)
+            segmentationNode.GetClosedSurfaceRepresentation(bodySegmentID, body_poly)
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to get surface representation from segmentation: {e}")
+            return None
+
+        if body_poly.GetNumberOfPoints() == 0:
+            slicer.util.warningDisplay("The 'Body' segment polydata is empty.")
+            return None
+
+        return body_poly
+
     def findAndSetEntryPoint(self, pNode: 'MamriParameterNode') -> None:
         targetNode = pNode.targetFiducialNode
         segmentationNode = pNode.segmentationNode
@@ -381,22 +417,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             slicer.util.errorDisplay("Please select a body segmentation and place a target marker first.")
             return
 
-        body_poly = vtk.vtkPolyData()
-        segmentation = segmentationNode.GetSegmentation()
-        bodySegmentID = next((segmentation.GetSegmentIdBySegmentName(s.GetName()) for i in range(segmentation.GetNumberOfSegments()) if (s := segmentation.GetNthSegment(i)) and "Body" in s.GetName()), None)
-        
-        if not bodySegmentID:
-            slicer.util.errorDisplay("Could not find a segment named 'Body' in the selected segmentation.")
-            return
-            
-        try:
-            segmentationNode.GetClosedSurfaceRepresentation(bodySegmentID, body_poly)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to get surface representation from segmentation: {e}")
-            return
-
-        if body_poly.GetNumberOfPoints() == 0:
-            slicer.util.errorDisplay("The 'Body' segment is empty. Cannot find the closest point.")
+        body_poly = self._get_body_polydata(segmentationNode)
+        if not body_poly:
             return
 
         normals = vtk.vtkPolyDataNormals()
@@ -419,7 +441,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         point_locator.FindPointsWithinRadius(search_radius, target_pos, result_point_ids)
 
         up_vector = np.array([0, 1, 0])
-        normal_threshold = -0.34 # Corresponds to ~110 degrees from the 'up' vector
+        normal_threshold = 0.2 
         
         candidate_points = []
         for i in range(result_point_ids.GetNumberOfIds()):
@@ -453,100 +475,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         logging.info(f"Found accessible optimal entry point at {closest_point_coords}. Distance to target: {best_candidate['distance']:.2f} mm")
         slicer.util.infoDisplay("Accessible optimal entry point has been calculated and set.")
 
-    def planTrajectory(self, pNode: MamriParameterNode) -> None:
-        logging.info("Starting trajectory planning for needle alignment...")
-        targetNode = pNode.targetFiducialNode
-        entryNode = pNode.entryPointFiducialNode
-        if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and entryNode and entryNode.GetNumberOfControlPoints() > 0):
-            slicer.util.errorDisplay("Set a target marker and an entry marker to plan trajectory.")
-            return
-
-        target_pos = np.array(targetNode.GetNthControlPointPositionWorld(0))
-        entry_pos = np.array(entryNode.GetNthControlPointPositionWorld(0))
-        direction_vec = target_pos - entry_pos
-        if np.linalg.norm(direction_vec) < 1e-6:
-            slicer.util.errorDisplay("Entry and Target markers are at the same position.")
-            return
-        x_axis = direction_vec / np.linalg.norm(direction_vec)
-        needle_tip_pos = entry_pos - (pNode.safetyDistance * x_axis)
-        
-        self._visualize_trajectory_line(target_pos, needle_tip_pos)
-        
-        up_vec = np.array([0, 0, 1.0])
-        if abs(np.dot(x_axis, up_vec)) > 0.99: up_vec = np.array([0, 1.0, 0])
-        y_axis = np.cross(up_vec, x_axis); y_axis /= np.linalg.norm(y_axis)
-        z_axis = np.cross(x_axis, y_axis)
-        target_matrix_np = np.identity(4)
-        target_matrix_np[:3, 0] = x_axis; target_matrix_np[:3, 1] = y_axis; target_matrix_np[:3, 2] = z_axis; target_matrix_np[:3, 3] = needle_tip_pos
-        target_transform_vtk = vtk.vtkMatrix4x4(); target_transform_vtk.DeepCopy(target_matrix_np.flatten())
-        
-        articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
-        chain_defs = [self.robot_definition_dict[name] for name in articulated_chain]
-        bounds_rad = [tuple(math.radians(l) for l in jdef["joint_limits"]) for jdef in chain_defs]
-        bounds_lower, bounds_upper = zip(*bounds_rad)
-
-        base_node = self.jointTransformNodes.get("Baseplate")
-        if not base_node:
-            slicer.util.errorDisplay("Cannot plan trajectory: Robot model is not loaded or baseplate is missing.")
-            return
-        base_transform_vtk = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(base_transform_vtk)
-
-        initial_guesses = [
-            self._get_current_joint_angles(articulated_chain),
-            [0.0] * len(articulated_chain),
-            [math.radians(a) for a in [0, 30, 30, 0, 0, 0]],
-            [math.radians(a) for a in [0, -30, -30, 0, 0, 0]]
-        ]
-
-        best_result = None
-        lowest_error = float('inf')
-
-        logging.info("Solving IK for the target needle pose with multiple initial guesses...")
-        for i, initial_guess in enumerate(initial_guesses):
-            logging.info(f"  - Trying initial guess #{i+1}...")
-            with slicer.util.MessageDialog(f"Planning Trajectory (Attempt {i+1}/{len(initial_guesses)})", "Solving inverse kinematics...") as dialog:
-                slicer.app.processEvents()
-                try:
-                    result = scipy.optimize.least_squares(
-                        self._ik_pose_error_function, initial_guess, bounds=(bounds_lower, bounds_upper),
-                        args=(articulated_chain, target_transform_vtk, base_transform_vtk),
-                        method='trf', ftol=1e-4, xtol=1e-4, verbose=0)
-                except Exception as e:
-                    logging.warning(f"IK optimization for guess #{i+1} failed with an exception: {e}")
-                    continue
-
-            final_error = np.linalg.norm(result.fun)
-            logging.info(f"    > Guess #{i+1} finished with error: {final_error:.4f}")
-
-            if result.success and final_error < 1.0:
-                logging.info(f"Found a good solution with error {final_error:.4f}. Using this result.")
-                best_result = result
-                break
-
-            if final_error < lowest_error:
-                lowest_error = final_error
-                best_result = result
-
-        if best_result is None:
-            slicer.util.errorDisplay("IK optimization failed for all initial guesses.")
-            return
-        
-        final_error = np.linalg.norm(best_result.fun)
-        logging.info(f"Applying best IK solution found (Error: {final_error:.2f}):")
-        for i, name in enumerate(articulated_chain):
-            angle_deg = math.degrees(best_result.x[i])
-            logging.info(f"  - {name}: {angle_deg:.2f}°")
-            if tf_node := self.jointTransformNodes.get(name):
-                tf_node.SetMatrixTransformToParent(self._get_rotation_transform(angle_deg, self.robot_definition_dict[name].get("articulation_axis")).GetMatrix())
-        
-        if needle_tf := self.jointTransformNodes.get("Needle"):
-            needle_tf.SetMatrixTransformToParent(vtk.vtkMatrix4x4())
-
-        if not best_result.success or final_error > 1.0:
-            slicer.util.warningDisplay(f"IK solution has high error: {final_error:.2f}. The robot may not be perfectly aligned, but the closest solution was applied.")
-        else:
-            slicer.util.infoDisplay(f"Trajectory planned successfully. Final error: {final_error:.2f}.")
-
     def _ik_pose_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform):
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
         fk_transform = self._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform)
@@ -565,8 +493,238 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         orientation_error = 50 * (target_x_axis - actual_needle_direction)
         
         return np.concatenate((pos_error, orientation_error)).tolist()
+    
+    def _visualize_collision_check(self, part_name: str, part_local_poly: vtk.vtkPolyData, part_transform: vtk.vtkMatrix4x4, body_poly: vtk.vtkPolyData):
+        """Creates temporary models to visualize a single step of the collision check."""
+        transform_filter = vtk.vtkTransformPolyDataFilter()
+        transform = vtk.vtkTransform(); transform.SetMatrix(part_transform)
+        transform_filter.SetInputData(part_local_poly); transform_filter.SetTransform(transform); transform_filter.Update()
+        part_world_poly = transform_filter.GetOutput()
         
+        part_debug_node_name = f"DEBUG_COLLISION_{part_name}"
+        part_debug_node = slicer.mrmlScene.GetFirstNodeByName(part_debug_node_name)
+        if not part_debug_node:
+            part_debug_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", part_debug_node_name)
+            part_debug_node.CreateDefaultDisplayNodes()
+            disp_node = part_debug_node.GetDisplayNode()
+            disp_node.SetColor(1, 1, 0); disp_node.SetOpacity(0.5); disp_node.SetSliceIntersectionVisibility(False)
+        part_debug_node.SetAndObservePolyData(part_world_poly)
+        part_debug_node.GetDisplayNode().SetVisibility(True)
+
+        body_debug_node_name = "DEBUG_COLLISION_Body"
+        body_debug_node = slicer.mrmlScene.GetFirstNodeByName(body_debug_node_name)
+        if not slicer.mrmlScene.IsNodePresent(body_debug_node):
+            body_debug_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", body_debug_node_name)
+            body_debug_node.CreateDefaultDisplayNodes()
+            disp_node = body_debug_node.GetDisplayNode()
+            disp_node.SetColor(1, 0, 1); disp_node.SetOpacity(0.3); disp_node.SetSliceIntersectionVisibility(False)
+            body_debug_node.SetAndObservePolyData(body_poly)
+        body_debug_node.GetDisplayNode().SetVisibility(True)
+
+    def _check_collision(self, joint_angles_rad: Dict[str, float], base_transform_vtk: vtk.vtkMatrix4x4, body_polydata: vtk.vtkPolyData) -> bool:
+        """Checks for collision using pre-loaded simplified collision models."""
+        if not body_polydata or body_polydata.GetNumberOfPoints() == 0:
+            return False
+
+        parts_to_check = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
+        
+        collision_detector = vtk.vtkCollisionDetectionFilter()
+        identity_matrix = vtk.vtkMatrix4x4()
+        collision_detector.SetInputData(1, body_polydata)
+        collision_detector.SetMatrix(1, identity_matrix)
+
+        for part_name in parts_to_check:
+            robot_part_local_poly = self.jointCollisionPolys.get(part_name)
+            if not robot_part_local_poly:
+                continue 
+
+            part_world_transform_vtk = self._get_world_transform_for_joint(joint_angles_rad, part_name, base_transform_vtk)
+            if not part_world_transform_vtk: continue
+
+            collision_detector.SetInputData(0, robot_part_local_poly)
+            collision_detector.SetMatrix(0, part_world_transform_vtk)
+            collision_detector.Update()
+
+            if collision_detector.GetNumberOfContacts() > 0:
+                logging.debug(f"COLLISION DETECTED for part: {part_name}")
+                if self.DEBUG_COLLISIONS:
+                    self._visualize_collision_check(part_name, robot_part_local_poly, part_world_transform_vtk, body_polydata)
+                return True
+        return False
+
+    def _ik_pose_and_collision_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform, body_polydata):
+        """Wraps the pose error function with a collision check, returning a large penalty on collision."""
+        joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
+        if self._check_collision(joint_values_rad, base_transform, body_polydata):
+            return [1e4] * 6 
+        return self._ik_pose_error_function(angles_rad, articulated_joint_names, target_transform, base_transform)
+
+    def planTrajectory(self, pNode: MamriParameterNode) -> None:
+        logging.info("Starting trajectory planning for needle alignment with collision avoidance...")
+        targetNode, entryNode, segmentationNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode, pNode.segmentationNode
+        if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and entryNode and entryNode.GetNumberOfControlPoints() > 0):
+            slicer.util.errorDisplay("Set a target and an entry marker to plan trajectory."); return
+        if not segmentationNode:
+            slicer.util.errorDisplay("A body segmentation is required for collision detection."); return
+
+        body_polydata = self._get_body_polydata(segmentationNode)
+        if not body_polydata:
+            slicer.util.errorDisplay("Could not get body polydata from segmentation. Aborting."); return
+
+        original_poly_count = body_polydata.GetNumberOfPolys()
+        logging.info(f"Simplifying body model for collision detection (Original polys: {original_poly_count})...")
+        
+        decimator = vtk.vtkDecimatePro()
+        decimator.SetInputData(body_polydata)
+        decimator.SetTargetReduction(0.95)
+        decimator.PreserveTopologyOn()
+        decimator.Update()
+        simplified_body_polydata = decimator.GetOutput()
+        
+        new_poly_count = simplified_body_polydata.GetNumberOfPolys()
+        logging.info(f"...simplification complete (New polys: {new_poly_count}).")
+
+        target_pos, entry_pos = np.array(targetNode.GetNthControlPointPositionWorld(0)), np.array(entryNode.GetNthControlPointPositionWorld(0))
+        direction_vec = target_pos - entry_pos
+        if np.linalg.norm(direction_vec) < 1e-6: slicer.util.errorDisplay("Entry and Target markers are at the same position."); return
+        
+        x_axis = direction_vec / np.linalg.norm(direction_vec)
+        needle_tip_pos = entry_pos - (pNode.safetyDistance * x_axis)
+        self._visualize_trajectory_line(target_pos, needle_tip_pos)
+        
+        up_vec = np.array([0, 0, 1.0]); 
+        if abs(np.dot(x_axis, up_vec)) > 0.99: up_vec = np.array([0, 1.0, 0])
+        y_axis = np.cross(up_vec, x_axis); y_axis /= np.linalg.norm(y_axis)
+        z_axis = np.cross(x_axis, y_axis); target_matrix_np = np.identity(4)
+        target_matrix_np[:3, 0] = x_axis; target_matrix_np[:3, 1] = y_axis; target_matrix_np[:3, 2] = z_axis; target_matrix_np[:3, 3] = needle_tip_pos
+        target_transform_vtk = vtk.vtkMatrix4x4(); target_transform_vtk.DeepCopy(target_matrix_np.flatten())
+        
+        articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
+        chain_defs = [self.robot_definition_dict[name] for name in articulated_chain]
+        bounds_rad = [tuple(math.radians(l) for l in jdef["joint_limits"]) for jdef in chain_defs]
+        bounds_lower, bounds_upper = zip(*bounds_rad)
+
+        base_node = self.jointTransformNodes.get("Baseplate")
+        if not base_node: slicer.util.errorDisplay("Cannot plan trajectory: Robot model not loaded or baseplate is missing."); return
+        base_transform_vtk = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(base_transform_vtk)
+
+        # --- PRE-FLIGHT CHECK: See if the current pose is already good enough ---
+        ACCEPTANCE_THRESHOLD = 1.0
+        current_angles_rad = self._get_current_joint_angles(articulated_chain)
+        current_angles_dict = {name: angle for name, angle in zip(articulated_chain, current_angles_rad)}
+        is_colliding_at_start = self._check_collision(current_angles_dict, base_transform_vtk, simplified_body_polydata)
+        
+        if not is_colliding_at_start:
+            current_error = np.linalg.norm(self._ik_pose_error_function(current_angles_rad, articulated_chain, target_transform_vtk, base_transform_vtk))
+            logging.info(f"Pre-check of current pose: Collision={is_colliding_at_start}, Error={current_error:.4f}")
+            if current_error < ACCEPTANCE_THRESHOLD:
+                slicer.util.infoDisplay("Current robot pose is already a valid solution. No optimization needed.")
+                logging.info("Current robot pose is already a valid solution. Skipping optimization.")
+                return 
+        # --- END PRE-FLIGHT CHECK ---
+
+        initial_guesses = [current_angles_rad, [0.0] * len(articulated_chain), [math.radians(a) for a in [0, 30, 30, 0, 0, 0]], [math.radians(a) for a in [0, -30, -30, 0, 0, 0]]]
+        
+        best_result, lowest_error = None, float('inf')
+        best_colliding_result, lowest_colliding_error = None, float('inf')
+        
+        wasCancelled = False
+        progressDialog = slicer.util.createProgressDialog(parent=slicer.util.mainWindow(), windowTitle="Planning Trajectory...", maximum=len(initial_guesses))
+        
+        try:
+            for i, initial_guess in enumerate(initial_guesses):
+                progressDialog.setValue(i)
+                progressDialog.setLabelText(f"Trying initial guess #{i+1}...")
+                slicer.app.processEvents()
+                if progressDialog.wasCanceled:
+                    wasCancelled = True
+                    break
+                
+                try: 
+                    result = scipy.optimize.least_squares(
+                        self._ik_pose_and_collision_error_function, 
+                        initial_guess, 
+                        bounds=(bounds_lower, bounds_upper), 
+                        args=(articulated_chain, target_transform_vtk, base_transform_vtk, simplified_body_polydata), 
+                        method='trf', 
+                        ftol=1e-3, xtol=1e-3, max_nfev=100, verbose=0)
+                except Exception as e: 
+                    logging.warning(f"IK optimization for guess #{i+1} failed: {e}"); continue
+
+                final_angles_dict = {name: angle for name, angle in zip(articulated_chain, result.x)}
+                is_colliding = self._check_collision(final_angles_dict, base_transform_vtk, simplified_body_polydata)
+                final_error = np.linalg.norm(self._ik_pose_error_function(result.x, articulated_chain, target_transform_vtk, base_transform_vtk))
+                logging.info(f"    > Guess #{i+1} finished. Pose Error: {final_error:.4f}. Collision: {is_colliding}")
+                
+                if not is_colliding and result.success:
+                    if final_error < lowest_error:
+                        lowest_error = final_error; best_result = result
+                    if final_error < ACCEPTANCE_THRESHOLD:
+                        logging.info(f"Found a high-quality solution with error {final_error:.4f}. Halting search early.")
+                        break
+                elif is_colliding and result.success:
+                    if final_error < lowest_colliding_error:
+                        lowest_colliding_error = final_error; best_colliding_result = result
+        finally:
+            progressDialog.setValue(len(initial_guesses))
+            progressDialog = None
+
+        if wasCancelled:
+            logging.warning("Trajectory planning was cancelled by the user.")
+            return
+
+        final_result = best_result if best_result is not None else best_colliding_result
+        if final_result is None: slicer.util.errorDisplay("IK optimization failed for all initial guesses."); return
+        
+        final_is_colliding = best_result is None
+        final_error = lowest_error if not final_is_colliding else lowest_colliding_error
+        
+        logging.info(f"Applying best IK solution found (Pose Error: {final_error:.2f}, Collision: {final_is_colliding}):")
+        if final_is_colliding:
+            slicer.util.warningDisplay(f"Could not find a collision-free path. The best solution found still results in a collision (Error: {final_error:.2f}). Please adjust target/entry points.")
+        
+        for i, name in enumerate(articulated_chain):
+            angle_deg = math.degrees(final_result.x[i]); logging.info(f"  - {name}: {angle_deg:.2f}°")
+            if tf_node := self.jointTransformNodes.get(name): tf_node.SetMatrixTransformToParent(self._get_rotation_transform(angle_deg, self.robot_definition_dict[name].get("articulation_axis")).GetMatrix())
+        
+        if needle_tf := self.jointTransformNodes.get("Needle"): needle_tf.SetMatrixTransformToParent(vtk.vtkMatrix4x4())
+
+        if not final_is_colliding:
+            slicer.util.infoDisplay(f"Collision-free trajectory planned successfully. Final pose error: {final_error:.2f}.")
+        
+    def _load_collision_models(self):
+        """
+        Loads the simplified collision models from the paths defined in the robot structure.
+        If a specific collision model doesn't exist, it falls back to using the visual model's geometry.
+        """
+        logging.info("Loading robot collision models...")
+        self.jointCollisionPolys.clear()
+        for joint_info in self.robot_definition:
+            jn = joint_info["name"]
+            collision_path = joint_info.get("collision_stl_path")
+            
+            polydata = None
+            if collision_path and os.path.exists(collision_path):
+                try:
+                    reader = vtk.vtkSTLReader()
+                    reader.SetFileName(collision_path)
+                    reader.Update()
+                    polydata = reader.GetOutput()
+                    logging.info(f"  - Loaded custom collision model for {jn}")
+                except Exception as e:
+                    logging.error(f"Failed to load collision STL '{collision_path}' for {jn}: {e}")
+            
+            if not polydata:
+                if model_node := self.jointModelNodes.get(jn):
+                    if model_node.GetPolyData():
+                        polydata = model_node.GetPolyData()
+                        logging.warning(f"  - No custom collision model for {jn}. Falling back to visual model polydata.")
+
+            if polydata:
+                self.jointCollisionPolys[jn] = polydata
+
     def _build_robot_model(self, baseplate_transform_matrix: vtk.vtkMatrix4x4):
+        # Build the visual models first
         for joint_info in self.robot_definition:
             jn = joint_info["name"]
             stl_path = joint_info["stl_path"]
@@ -583,6 +741,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                     self.jointFixedOffsetTransformNodes[jn] = fixed_offset_node
                     art_tf_node.SetAndObserveTransformNodeID(fixed_offset_node.GetID())
                 else: logging.error(f"Parent '{parent_name}' articulation node not found for '{jn}'.")
+        
+        self._load_collision_models()
 
     def _solve_all_ik_chains(self, identified_joints_data: Dict[str, List[Dict]]):
         for chain in self.ik_chains_config:
@@ -879,6 +1039,14 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
     def _cleanup_module_nodes(self):
         logging.info("Cleaning up module nodes...")
+        self.jointCollisionPolys.clear()
+
+        if getattr(self, 'DEBUG_COLLISIONS', False):
+            logging.info("Cleaning up collision debug nodes...")
+            all_parts = [j["name"] for j in self.robot_definition] + ["Body"]
+            for part_name in all_parts:
+                self._clear_node_by_name(f"DEBUG_COLLISION_{part_name}")
+        
         all_node_names_to_clear = {
             "DetectedFiducials", 
             self.TARGET_POSE_TRANSFORM_NODE_NAME,
