@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>726</width>
-    <height>705</height>
+    <width>724</width>
+    <height>700</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
@@ -174,10 +174,10 @@
          <stringlist notr="true"/>
         </property>
         <property name="addEnabled">
-         <bool>false</bool>
+         <bool>true</bool>
         </property>
         <property name="removeEnabled">
-         <bool>false</bool>
+         <bool>true</bool>
         </property>
         <property name="interactionNodeSingletonTag">
          <string>Singleton</string>
