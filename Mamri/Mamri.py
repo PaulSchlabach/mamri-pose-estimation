@@ -70,6 +70,10 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.logic = None
         self._parameterNode = None
         self._parameterNodeGuiTag = None
+        
+        self._animationTimer = None
+        self._isPlaying = False
+        self.trajectoryPath = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -80,7 +84,7 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "applyButton"):
             self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
         if hasattr(self.ui, "planTrajectoryButton"):
-            self.ui.planTrajectoryButton.connect("clicked(bool)", self.onPlanTrajectoryButton)
+            self.ui.planTrajectoryButton.clicked.connect(self.onPlanHeuristicPathButton)
         if hasattr(self.ui, "drawFiducialsCheckBox"):
             self.ui.drawFiducialsCheckBox.connect("toggled(bool)", self.onDrawFiducialsCheckBoxToggled)
         if hasattr(self.ui, "drawModelsCheckBox"):
@@ -92,6 +96,15 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "zeroRobotButton"):
             self.ui.zeroRobotButton.connect("clicked(bool)", self.onZeroRobotButton)
             
+        if hasattr(self.ui, "trajectorySlider"):
+            self.ui.trajectorySlider.valueChanged.connect(self.onTrajectorySliderChanged)
+        if hasattr(self.ui, "playPauseButton"):
+            self.ui.playPauseButton.clicked.connect(self.onPlayPauseButton)
+            
+        self._animationTimer = qt.QTimer()
+        self._animationTimer.setInterval(50) # Update every 50ms
+        self._animationTimer.timeout.connect(self.doAnimationStep)
+
         uiWidget.setMRMLScene(slicer.mrmlScene)
 
         self.logic = MamriLogic()
@@ -99,8 +112,11 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
         self.initializeParameterNode()
 
-    def cleanup(self) -> None: self.removeObservers()
-    
+    def cleanup(self) -> None: 
+        self.removeObservers()
+        if self._animationTimer:
+            self._animationTimer.stop()
+
     def enter(self) -> None: 
         self.initializeParameterNode()
         self._checkAllButtons()
@@ -154,16 +170,25 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         model_is_built = self.logic and self.logic.jointTransformNodes.get("Baseplate") is not None
         
+        can_plan_base = (self._parameterNode and
+                         self._parameterNode.targetFiducialNode and self._parameterNode.targetFiducialNode.GetNumberOfControlPoints() > 0 and
+                         self._parameterNode.entryPointFiducialNode and self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0 and
+                         self._parameterNode.segmentationNode)
+        
         if hasattr(self.ui, "planTrajectoryButton"):
-            can_plan_base = (self._parameterNode and
-                             self._parameterNode.targetFiducialNode and self._parameterNode.targetFiducialNode.GetNumberOfControlPoints() > 0 and
-                             self._parameterNode.entryPointFiducialNode and self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0 and
-                             self._parameterNode.segmentationNode)
             self.ui.planTrajectoryButton.enabled = can_plan_base and model_is_built
         
         if hasattr(self.ui, "zeroRobotButton"):
             self.ui.zeroRobotButton.enabled = model_is_built
             self.ui.zeroRobotButton.toolTip = _("Sets all robot joint angles to zero.") if model_is_built else _("Run 'Start robot pose estimation' first to build the model.")
+        
+        trajectory_is_planned = self.trajectoryPath is not None
+        if hasattr(self.ui, "trajectorySlider"):
+            self.ui.trajectorySlider.enabled = trajectory_is_planned
+        if hasattr(self.ui, "playPauseButton"):
+            self.ui.playPauseButton.enabled = trajectory_is_planned
+        if hasattr(self.ui, "trajectoryStatusLabel"):
+            self.ui.trajectoryStatusLabel.text = "Trajectory ready" if trajectory_is_planned else "(No trajectory planned)"
 
     def onApplyButton(self) -> None:
         if not self._parameterNode:
@@ -176,10 +201,61 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.logic.process(self._parameterNode, models_visible=models_visible, markers_visible=markers_visible)
         self._checkAllButtons()
     
-    def onPlanTrajectoryButton(self) -> None:
+    def onPlanHeuristicPathButton(self) -> None:
         if not self._parameterNode:
-            slicer.util.errorDisplay("Parameter node is not initialized."); return
-        self.logic.planTrajectory(self._parameterNode)
+            slicer.util.errorDisplay("Parameter node is not initialized.")
+            return
+
+        if self._isPlaying:
+            self.onPlayPauseButton()
+        
+        with slicer.util.MessageDialog("Planning...", "Generating heuristic path...") as dialog:
+            slicer.app.processEvents()
+            self.trajectoryPath = self.logic.planHeuristicPath(self._parameterNode)
+
+        if self.trajectoryPath:
+            slicer.util.infoDisplay(f"Generated heuristic path with {len(self.trajectoryPath)} steps.")
+            if hasattr(self.ui, "trajectorySlider"):
+                self.ui.trajectorySlider.blockSignals(True)
+                self.ui.trajectorySlider.maximum = len(self.trajectoryPath) - 1
+                self.ui.trajectorySlider.value = 0
+                self.ui.trajectorySlider.blockSignals(False)
+            self.onTrajectorySliderChanged(0) # Move robot to the start of the path
+        else:
+            slicer.util.errorDisplay("Failed to generate heuristic path. Could not determine a valid end configuration.")
+
+        self._checkAllButtons()
+
+    def onPlayPauseButton(self):
+        if self._isPlaying:
+            self._animationTimer.stop()
+            self._isPlaying = False
+            self.ui.playPauseButton.text = "Play"
+        else:
+            if self.ui.trajectorySlider.value == self.ui.trajectorySlider.maximum:
+                self.ui.trajectorySlider.value = 0
+            
+            self._animationTimer.start()
+            self._isPlaying = True
+            self.ui.playPauseButton.text = "Pause"
+            
+    def onTrajectorySliderChanged(self, value):
+        if self.trajectoryPath is None or value >= len(self.trajectoryPath):
+            return
+            
+        self.logic.setRobotPose(self.trajectoryPath[value])
+        if hasattr(self.ui, "trajectoryStatusLabel"):
+            percent = (value / self.ui.trajectorySlider.maximum) * 100 if self.ui.trajectorySlider.maximum > 0 else 0
+            self.ui.trajectoryStatusLabel.text = f"Path: {percent:.0f}%"
+
+    def doAnimationStep(self):
+        current_value = self.ui.trajectorySlider.value
+        if current_value < self.ui.trajectorySlider.maximum:
+            self.ui.trajectorySlider.value = current_value + 1
+        else:
+            self._animationTimer.stop()
+            self._isPlaying = False
+            self.ui.playPauseButton.text = "Play"
 
     def onFindEntryPointButton(self) -> None:
         if not self._parameterNode:
@@ -215,13 +291,14 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 # MamriLogic
 #
 class MamriLogic(ScriptedLoadableModuleLogic):
+
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
         self.jointModelNodes: Dict[str, vtkMRMLModelNode] = {}
         self.jointTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
         self.jointFixedOffsetTransformNodes: Dict[str, vtkMRMLLinearTransformNode] = {}
         self.jointCollisionPolys: Dict[str, vtk.vtkPolyData] = {}
-        
+
         self.INTENSITY_THRESHOLD = 65.0
         self.MIN_VOLUME_THRESHOLD = 150.0
         self.MAX_VOLUME_THRESHOLD = 1500.0
@@ -242,14 +319,82 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.DEBUG_COLLISIONS = False 
         if self.DEBUG_COLLISIONS:
             logging.warning("MamriLogic collision debugging is enabled. This will create temporary models in the scene.")
-
-        self.ik_chains_config = [
-            {"parent_of_proximal": "Baseplate", "proximal": "Shoulder1", "distal_with_markers": "Link1", "log_name": "Shoulder1/Link1"},
-            {"parent_of_proximal": "Link1", "proximal": "Shoulder2", "distal_with_markers": "Elbow1", "log_name": "Shoulder2/Elbow1"},
-            {"parent_of_proximal": "Elbow1", "proximal": "Wrist", "distal_with_markers": "End", "log_name": "Wrist/End"},
-        ]
         
         self._discover_robot_nodes_in_scene()
+        
+    def setRobotPose(self, joint_angles_rad: np.ndarray):
+        """
+        Sets the robot's joint angles to a specific configuration.
+        :param joint_angles_rad: Array of joint angles in radians.
+        """
+        articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
+        for j, joint_name in enumerate(articulated_chain):
+            if node := self.jointTransformNodes.get(joint_name):
+                angle_deg = math.degrees(joint_angles_rad[j])
+                transform = self._get_rotation_transform(angle_deg, self.robot_definition_dict[joint_name].get("articulation_axis"))
+                node.SetMatrixTransformToParent(transform.GetMatrix())
+
+    def planHeuristicPath(self, pNode: 'MamriParameterNode', total_steps=100) -> Optional[List[np.ndarray]]:
+        """
+        Generates a collision-avoidance path using a pre-defined 3-segment heuristic.
+        Path: Start -> (Link1 Up) -> (Shoulder1 Rotated) -> End
+        """
+        logging.info("Planning heuristic 'up, over, down' path...")
+
+        # 1. Get Start and End Configurations
+        start_config = np.array(self._get_current_joint_angles(["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]))
+        end_config = self.planTrajectory(pNode, solve_only=True)
+        
+        if end_config is None:
+            logging.error("Heuristic planning failed: Could not determine a valid end configuration.")
+            return None
+
+        # 2. Define the key waypoints for the heuristic path
+        # Waypoint 1: Lift Link1 up. We assume 'up' is an angle of 0.0 radians.
+        waypoint1_config = np.copy(start_config)
+        waypoint1_config[1] = 0.0  # Index 1 corresponds to Link1
+
+        # Waypoint 2: Rotate Shoulder1 to its final orientation, while Link1 is still up.
+        waypoint2_config = np.copy(waypoint1_config)
+        waypoint2_config[0] = end_config[0] # Index 0 corresponds to Shoulder1
+
+        keyframes = [start_config, waypoint1_config, waypoint2_config, end_config]
+        
+        # 3. Interpolate between the keyframes to create a dense, smooth path
+        path = []
+        # Allocate steps proportionally to make the animation speed feel more constant
+        segment_steps = [total_steps // 4, total_steps // 4, total_steps // 2]
+        
+        for i in range(len(keyframes) - 1):
+            start_wp = keyframes[i]
+            end_wp = keyframes[i+1]
+            steps = segment_steps[i]
+            
+            # Don't add the last point of a segment if it's not the final segment
+            # to avoid duplicate points.
+            is_last_segment = (i == len(keyframes) - 2)
+            
+            for j in range(steps):
+                t = j / float(steps)
+                interp_config = start_wp + t * (end_wp - start_wp)
+                path.append(interp_config)
+            
+            if is_last_segment:
+                path.append(end_wp)
+
+        # 4. Check the generated path for collisions
+        body_poly = self._get_body_polydata(pNode.segmentationNode)
+        base_tf = vtk.vtkMatrix4x4()
+        if base_node := self.jointTransformNodes.get("Baseplate"):
+            base_node.GetMatrixTransformToWorld(base_tf)
+        
+        for config in path:
+            if self._check_collision(dict(zip(["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"], config)), base_tf, body_poly):
+                logging.warning("Heuristic path resulted in a collision. The path may be unsafe.")
+                slicer.util.warningDisplay("Warning: The generated 'up and over' path still results in a collision. Manual adjustment may be needed.")
+                break # We can still return the path, but with a warning.
+
+        return path
 
     def zeroRobot(self) -> None:
         if not self.jointTransformNodes:
@@ -386,7 +531,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             
             self._build_robot_model(baseplate_transform_matrix)
             
-            # Pass the correction flag to the IK solvers
             apply_correction = parameterNode.applyEndEffectorCorrection
 
             if baseplate_transform_found and "End" in identified_joints_data:
@@ -542,36 +686,41 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return False
 
     def _ik_pose_and_collision_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform, body_polydata):
+        """Wraps the pose error function with a collision check, returning a large penalty on collision."""
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
         if self._check_collision(joint_values_rad, base_transform, body_polydata):
-            return [1e4] * 6 
+            return [1e4] * 6
         return self._ik_pose_error_function(angles_rad, articulated_joint_names, target_transform, base_transform)
 
-    def planTrajectory(self, pNode: MamriParameterNode) -> None:
+    def planTrajectory(self, pNode: MamriParameterNode, solve_only=False) -> Optional[np.ndarray]:
+        if not solve_only:
+            logging.info("Starting trajectory goal calculation...")
+        
         targetNode, entryNode, segmentationNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode, pNode.segmentationNode
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and entryNode and entryNode.GetNumberOfControlPoints() > 0 and segmentationNode):
-            slicer.util.errorDisplay("Set target, entry, and segmentation to plan trajectory."); return
+            if not solve_only: slicer.util.errorDisplay("Set target, entry, and segmentation to plan trajectory.")
+            return None
 
         body_polydata = self._get_body_polydata(segmentationNode)
         if not body_polydata:
-            slicer.util.errorDisplay("Could not get body polydata from segmentation. Aborting."); return
+            if not solve_only: slicer.util.errorDisplay("Could not get body polydata from segmentation. Aborting.")
+            return None
 
-        decimator = vtk.vtkDecimatePro()
-        decimator.SetInputData(body_polydata)
-        decimator.SetTargetReduction(0.95)
-        decimator.PreserveTopologyOn()
-        decimator.Update()
-        simplified_body_polydata = decimator.GetOutput()
+        simplified_body_polydata = body_polydata
 
         target_pos, entry_pos = np.array(targetNode.GetNthControlPointPositionWorld(0)), np.array(entryNode.GetNthControlPointPositionWorld(0))
         direction_vec = target_pos - entry_pos
-        if np.linalg.norm(direction_vec) < 1e-6: slicer.util.errorDisplay("Entry and Target markers are at the same position."); return
+        if np.linalg.norm(direction_vec) < 1e-6:
+            if not solve_only: slicer.util.errorDisplay("Entry and Target markers are at the same position.")
+            return None
         
         x_axis = direction_vec / np.linalg.norm(direction_vec)
         needle_tip_pos = entry_pos - (pNode.safetyDistance * x_axis)
-        line_node = self._visualize_trajectory_line(target_pos, needle_tip_pos)
-        if line_node:
-            self._organize_node_in_subject_hierarchy(line_node, self.MASTER_FOLDER_NAME, "Trajectory Plan")
+        
+        if not solve_only:
+            line_node = self._visualize_trajectory_line(target_pos, needle_tip_pos)
+            if line_node:
+                self._organize_node_in_subject_hierarchy(line_node, self.MASTER_FOLDER_NAME, "Trajectory Plan")
         
         up_vec = np.array([0, 0, 1.0]); 
         if abs(np.dot(x_axis, up_vec)) > 0.99: up_vec = np.array([0, 1.0, 0])
@@ -586,10 +735,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         bounds_lower, bounds_upper = zip(*bounds_rad)
 
         base_node = self.jointTransformNodes.get("Baseplate")
-        if not base_node: slicer.util.errorDisplay("Robot model not loaded or baseplate is missing."); return
+        if not base_node:
+            if not solve_only: slicer.util.errorDisplay("Robot model not loaded or baseplate is missing.")
+            return None
         base_transform_vtk = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(base_transform_vtk)
 
-        initial_guesses = [self._get_current_joint_angles(articulated_chain), [0.0] * len(articulated_chain)]
+        current_angles_rad = np.array(self._get_current_joint_angles(articulated_chain))
+        initial_guesses = [current_angles_rad, [0.0] * len(articulated_chain)]
         
         best_result, lowest_error = None, float('inf')
         
@@ -598,26 +750,21 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 result = scipy.optimize.least_squares(
                     self._ik_pose_and_collision_error_function, initial_guess, bounds=(bounds_lower, bounds_upper), 
                     args=(articulated_chain, target_transform_vtk, base_transform_vtk, simplified_body_polydata), 
-                    method='trf', ftol=1e-3, xtol=1e-3, max_nfev=200)
+                    method='trf', ftol=1e-4, xtol=1e-4, max_nfev=200)
+                
+                final_error = np.linalg.norm(self._ik_pose_error_function(result.x, articulated_chain, target_transform_vtk, base_transform_vtk))
+                
+                if result.success and final_error < lowest_error:
+                    lowest_error = final_error
+                    best_result = result
             except Exception as e: 
-                logging.warning(f"IK optimization failed for one guess: {e}"); continue
-
-            final_angles_dict = {name: angle for name, angle in zip(articulated_chain, result.x)}
-            is_colliding = self._check_collision(final_angles_dict, base_transform_vtk, simplified_body_polydata)
-            final_error = np.linalg.norm(self._ik_pose_error_function(result.x, articulated_chain, target_transform_vtk, base_transform_vtk))
-            
-            if not is_colliding and result.success and final_error < lowest_error:
-                lowest_error = final_error; best_result = result
+                logging.warning(f"IK optimization failed for one guess: {e}")
         
-        if not best_result: slicer.util.errorDisplay("Could not find a valid, collision-free trajectory solution."); return
+        if not best_result: 
+            if not solve_only: slicer.util.errorDisplay("Could not find a valid, collision-free trajectory solution.")
+            return None
 
-        for i, name in enumerate(articulated_chain):
-            angle_deg = math.degrees(best_result.x[i])
-            if tf_node := self.jointTransformNodes.get(name): tf_node.SetMatrixTransformToParent(self._get_rotation_transform(angle_deg, self.robot_definition_dict[name].get("articulation_axis")).GetMatrix())
-        
-        if needle_tf := self.jointTransformNodes.get("Needle"): needle_tf.SetMatrixTransformToParent(vtk.vtkMatrix4x4())
-
-        slicer.util.infoDisplay(f"Collision-free trajectory planned. Final pose error: {lowest_error:.2f}.")
+        return np.array(best_result.x)
         
     def _load_collision_models(self):
         logging.info("Loading robot collision models...")
@@ -698,7 +845,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if dist_def["name"] == "End" and apply_correction:
             rotation_transform = vtk.vtkTransform()
             rotation_transform.RotateZ(180)
-            corrected_local_coords = [rotation_transform.TransformPoint(p) for p in local_coords]
+            corrected_local_coords = [rotation_transform.TransformPoint(p) for p in corrected_local_coords]
         
         prox_offset = prox_def.get("fixed_offset_to_parent", vtk.vtkMatrix4x4()); prox_rot = self._get_rotation_transform(math.degrees(prox_rad), prox_def["articulation_axis"]).GetMatrix()
         dist_offset = dist_def.get("fixed_offset_to_parent", vtk.vtkMatrix4x4()); dist_rot = self._get_rotation_transform(math.degrees(dist_rad), dist_def["articulation_axis"]).GetMatrix()
@@ -724,7 +871,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         prox_rad, dist_rad = result.x
         if prox_node := self.jointTransformNodes.get(prox_name): prox_node.SetMatrixTransformToParent(self._get_rotation_transform(math.degrees(prox_rad), prox_def["articulation_axis"]).GetMatrix())
         if dist_node := self.jointTransformNodes.get(dist_name): dist_node.SetMatrixTransformToParent(self._get_rotation_transform(math.degrees(dist_rad), dist_def["articulation_axis"]).GetMatrix())
-        self._log_ik_results(result.x, target_mri, dist_local, tf_parent_to_world, prox_def, dist_def, dist_name, apply_correction)
+        self._log_ik_results(result.x, target_mri, dist_local, tf_parent, prox_def, dist_def, dist_name, apply_correction)
 
     def _get_world_transform_for_joint(self, joint_angles_rad: Dict[str, float], target_joint_name: str, base_transform_matrix: vtk.vtkMatrix4x4) -> Optional[vtk.vtkMatrix4x4]:
         world_transforms = {}
@@ -749,12 +896,12 @@ class MamriLogic(ScriptedLoadableModuleLogic):
     def _full_chain_ik_error_function(self, angles_rad, articulated_joint_names, end_target_ras, base_transform, end_def, apply_correction: bool, elbow_target_ras=None, elbow_def=None, elbow_weight=0.05):
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
         
-        end_local_coords = end_def["local_marker_coords"]
+        end_local_coords = list(end_def["local_marker_coords"])
         
-        # Apply correction if the flag is set
         if apply_correction:
             rotation_transform = vtk.vtkTransform()
             rotation_transform.RotateZ(180)
+            # <<< BUG FIX: Changed 'local_coords' to 'end_local_coords' >>>
             end_local_coords = [rotation_transform.TransformPoint(p) for p in end_local_coords]
         
         tf_end_model_to_world = self._get_world_transform_for_joint(joint_values_rad, end_def["name"], base_transform)
@@ -855,7 +1002,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         for name, angle_deg in zip(articulated_chain, final_angles_deg):
             logging.info(f"  - {name}: {angle_deg:.2f}°")
 
-        end_local_coords = end_def["local_marker_coords"]
+        end_local_coords = list(end_def["local_marker_coords"])
         if apply_correction:
             rotation_transform = vtk.vtkTransform()
             rotation_transform.RotateZ(180)
@@ -1098,7 +1245,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
         folders_to_clear = [
             "Robot Model", "Detected MRI Markers", "Debug Markers",
-            "Segmentations", "Trajectory Plan"
+            "Segmentations", "Trajectory Plan", "Sequences"
         ]
         
         masterFolderItemID = shNode.GetItemByName(self.MASTER_FOLDER_NAME)
