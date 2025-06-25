@@ -243,8 +243,11 @@
       </item>
       <item row="7" column="0" colspan="4">
        <widget class="QPushButton" name="planTrajectoryButton">
+        <property name="toolTip">
+         <string>Generates a safe path using a pre-defined 'up, over, down' maneuver.</string>
+        </property>
         <property name="text">
-         <string>Start robot trajectory planning</string>
+         <string>Plan Safe Path</string>
         </property>
         <property name="checkable">
          <bool>false</bool>
@@ -276,6 +279,46 @@
         </property>
        </widget>
       </item>
+      <item row="8" column="0" colspan="4">
+       <widget class="Line" name="line">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="0" colspan="4">
+       <widget class="QLabel" name="trajectoryStatusLabel">
+        <property name="text">
+         <string>Status: (No trajectory planned)</string>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+       </widget>
+      </item>
+      <item row="10" column="0" colspan="4">
+       <widget class="QSlider" name="trajectorySlider">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="maximum">
+         <number>100</number>
+        </property>
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+       </widget>
+      </item>
+      <item row="11" column="0" colspan="4">
+       <widget class="QPushButton" name="playPauseButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="text">
+         <string>Play</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -299,18 +342,18 @@
     </widget>
    </item>
    <item row="1" column="0">
-       <widget class="ctkCheckBox" name="applyCorrectionCheckBox">
-        <property name="toolTip">
-         <string>Applies a 180-degree rotation correction to the End Effector's local markers. Use this if the model appears flipped.</string>
-        </property>
-        <property name="text">
-         <string>Apply End-Effector Correction</string>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>applyEndEffectorCorrection</string>
-        </property>
-       </widget>
-      </item>
+    <widget class="ctkCheckBox" name="applyCorrectionCheckBox">
+     <property name="toolTip">
+      <string>Applies a 180-degree rotation correction to the End Effector's local markers. Use this if the model appears flipped.</string>
+     </property>
+     <property name="text">
+      <string>Apply End-Effector Correction</string>
+     </property>
+     <property name="SlicerParameterName" stdset="0">
+      <string>applyEndEffectorCorrection</string>
+     </property>
+    </widget>
+   </item>
    <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
