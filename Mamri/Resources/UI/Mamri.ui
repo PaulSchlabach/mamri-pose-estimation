@@ -280,6 +280,38 @@
     </widget>
    </item>
    <item>
+    <widget class="ctkCollapsibleButton" name="debugCollapsibleButton">
+     <property name="text">
+      <string>Debugging</string>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_4">
+      <item row="0" column="0">
+       <widget class="QPushButton" name="zeroRobotButton">
+        <property name="toolTip">
+         <string>Sets all robot joint angles to zero. Requires a robot model to be loaded first.</string>
+        </property>
+        <property name="text">
+         <string>Zero Robot Pose</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item row="1" column="0">
+       <widget class="ctkCheckBox" name="applyCorrectionCheckBox">
+        <property name="toolTip">
+         <string>Applies a 180-degree rotation correction to the End Effector's local markers. Use this if the model appears flipped.</string>
+        </property>
+        <property name="text">
+         <string>Apply End-Effector Correction</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>applyEndEffectorCorrection</string>
+        </property>
+       </widget>
+      </item>
+   <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
