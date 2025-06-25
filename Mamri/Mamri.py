@@ -352,7 +352,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         # 2. Define the key waypoints for the heuristic path
         # Waypoint 1: Lift Link1 up. We assume 'up' is an angle of 0.0 radians.
         waypoint1_config = np.copy(start_config)
-        waypoint1_config[1] = 0.0  # Index 1 corresponds to Link1
+        waypoint1_config[1] = math.radians(-15)  # Index 1 corresponds to Link1
 
         # Waypoint 2: Rotate Shoulder1 to its final orientation, while Link1 is still up.
         waypoint2_config = np.copy(waypoint1_config)
