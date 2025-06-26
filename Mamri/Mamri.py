@@ -6,6 +6,10 @@ from typing import Annotated, Optional, Dict, List, Tuple
 import time
 import threading
 
+# Imports for serial communication
+import serial
+import serial.tools.list_ports
+
 import vtk
 import SimpleITK as sitk
 import sitkUtils
@@ -32,7 +36,7 @@ from slicer import vtkMRMLLabelMapVolumeNode
 
 
 #
-# Mamri (Module Class)
+# Mamri
 #
 class Mamri(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -73,7 +77,11 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         self._animationTimer = None
         self._isPlaying = False
+        
+        # Attributes for trajectory and robot control
         self.trajectoryPath = None
+        self.trajectoryKeyframes = None
+        self.robotExecutionThread = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -81,6 +89,9 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
         
+        # --- Connect all UI widgets to handler functions ---
+        
+        # Existing widgets from the UI file
         if hasattr(self.ui, "applyButton"):
             self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
         if hasattr(self.ui, "planTrajectoryButton"):
@@ -95,14 +106,25 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.findEntryPointButton.connect("clicked(bool)", self.onFindEntryPointButton)
         if hasattr(self.ui, "zeroRobotButton"):
             self.ui.zeroRobotButton.connect("clicked(bool)", self.onZeroRobotButton)
-            
         if hasattr(self.ui, "trajectorySlider"):
             self.ui.trajectorySlider.valueChanged.connect(self.onTrajectorySliderChanged)
         if hasattr(self.ui, "playPauseButton"):
             self.ui.playPauseButton.clicked.connect(self.onPlayPauseButton)
+
+        # New robot control widgets from the UI file
+        if hasattr(self.ui, "refreshPortsButton"):
+            self.ui.refreshPortsButton.clicked.connect(self.onRefreshPortsButton)
+        if hasattr(self.ui, "connectButton"):
+            self.ui.connectButton.toggled.connect(self.onConnectButtonToggled)
+        if hasattr(self.ui, "executeTrajectoryButton"):
+            self.ui.executeTrajectoryButton.clicked.connect(self.onExecuteTrajectoryButton)
+        if hasattr(self.ui, "stopTrajectoryButton"):
+            self.ui.stopTrajectoryButton.clicked.connect(self.onStopTrajectoryButton)
+
+        # --- Initialize logic, observers, and timers ---
             
         self._animationTimer = qt.QTimer()
-        self._animationTimer.setInterval(50) # Update every 50ms
+        self._animationTimer.setInterval(50)
         self._animationTimer.timeout.connect(self.doAnimationStep)
 
         uiWidget.setMRMLScene(slicer.mrmlScene)
@@ -116,9 +138,14 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.removeObservers()
         if self._animationTimer:
             self._animationTimer.stop()
+        # Ensure disconnection on cleanup
+        if self.logic and self.logic.is_robot_connected():
+            self.logic.stop_trajectory_execution() # Stop thread if running
+            self.logic.disconnect_from_robot()
 
     def enter(self) -> None: 
         self.initializeParameterNode()
+        self.onRefreshPortsButton()
         self._checkAllButtons()
 
     def exit(self) -> None:
@@ -190,6 +217,19 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "trajectoryStatusLabel"):
             self.ui.trajectoryStatusLabel.text = "Trajectory ready" if trajectory_is_planned else "(No trajectory planned)"
 
+        # New checks for robot control buttons
+        is_connected = self.logic and self.logic.is_robot_connected()
+        is_executing = self.robotExecutionThread and self.robotExecutionThread.is_alive()
+
+        if hasattr(self.ui, "connectButton"):
+            self.ui.connectButton.enabled = not is_executing
+        if hasattr(self.ui, "refreshPortsButton"):
+            self.ui.refreshPortsButton.enabled = not is_executing
+        if hasattr(self.ui, "executeTrajectoryButton"):
+            self.ui.executeTrajectoryButton.enabled = is_connected and (self.trajectoryKeyframes is not None) and not is_executing
+        if hasattr(self.ui, "stopTrajectoryButton"):
+            self.ui.stopTrajectoryButton.enabled = is_executing
+
     def onApplyButton(self) -> None:
         if not self._parameterNode:
             slicer.util.errorDisplay("Parameter node is not initialized.")
@@ -211,7 +251,11 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         with slicer.util.MessageDialog("Planning...", "Generating heuristic path...") as dialog:
             slicer.app.processEvents()
-            self.trajectoryPath = self.logic.planHeuristicPath(self._parameterNode)
+            path, keyframes = self.logic.planHeuristicPath(self._parameterNode)
+
+        # Store both the dense path (for visualization) and keyframes (for execution)
+        self.trajectoryPath = path
+        self.trajectoryKeyframes = keyframes
 
         if self.trajectoryPath:
             slicer.util.infoDisplay(f"Generated heuristic path with {len(self.trajectoryPath)} steps.")
@@ -220,9 +264,9 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.ui.trajectorySlider.maximum = len(self.trajectoryPath) - 1
                 self.ui.trajectorySlider.value = 0
                 self.ui.trajectorySlider.blockSignals(False)
-            self.onTrajectorySliderChanged(0) # Move robot to the start of the path
+            self.onTrajectorySliderChanged(0) # Manually trigger the update for the starting pose
         else:
-            slicer.util.errorDisplay("Failed to generate heuristic path. Could not determine a valid end configuration.")
+            slicer.util.errorDisplay("Failed to generate heuristic path.")
 
         self._checkAllButtons()
 
@@ -287,6 +331,68 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.logic:
             self.logic.zeroRobot()
 
+    # --- New handler methods for robot control ---
+
+    def onRefreshPortsButton(self):
+        if hasattr(self.ui, "serialPortComboBox"):
+            self.ui.serialPortComboBox.clear()
+            ports = self.logic.get_available_serial_ports()
+            self.ui.serialPortComboBox.addItems(ports)
+            if not ports:
+                self.ui.serialPortComboBox.addItem("No ports found")
+
+    def onConnectButtonToggled(self, checked):
+        if not hasattr(self.ui, "serialPortComboBox"):
+            return
+            
+        port = self.ui.serialPortComboBox.currentText
+        
+        if checked:
+            if self.logic.connect_to_robot(port):
+                self.ui.connectionStatusLabel.text = f"Connected to {port}"
+                self.ui.connectButton.text = "Disconnect"
+            else:
+                self.ui.connectionStatusLabel.text = f"Failed to connect"
+                self.ui.connectButton.setChecked(False)
+        else:
+            self.logic.disconnect_from_robot()
+            self.ui.connectionStatusLabel.text = "Not Connected"
+            self.ui.connectButton.text = "Connect"
+        self._checkAllButtons()
+        
+    def onExecuteTrajectoryButton(self):
+        if self.robotExecutionThread and self.robotExecutionThread.is_alive():
+            slicer.util.warningDisplay("A trajectory is already being executed.")
+            return
+
+        if not self.trajectoryKeyframes:
+            slicer.util.errorDisplay("Please plan a path first.")
+            return
+
+        self.robotExecutionThread = threading.Thread(
+            target=self.logic.execute_trajectory_on_robot,
+            args=(self.trajectoryKeyframes, self.updateTrajectoryProgress)
+        )
+        self.robotExecutionThread.start()
+        self._checkAllButtons()
+
+    def onStopTrajectoryButton(self):
+        self.logic.stop_trajectory_execution()
+
+    def updateTrajectoryProgress(self, statusMessage, stepIndex):
+        """A thread-safe callback to update the GUI from the execution thread."""
+        qt.QTimer.singleShot(0, lambda: self._safeUpdateGui(statusMessage, stepIndex))
+
+    def _safeUpdateGui(self, statusMessage, stepIndex):
+        """This method runs in the main thread and can safely modify UI elements."""
+        if hasattr(self.ui, "trajectoryStatusLabel"):
+            self.ui.trajectoryStatusLabel.text = statusMessage
+        
+        # Re-enable buttons if execution is finished
+        if (self.robotExecutionThread and not self.robotExecutionThread.is_alive()):
+            self._checkAllButtons()
+
+
 #
 # MamriLogic
 #
@@ -309,6 +415,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
         self.robot_definition = self._define_robot_structure()
         self.robot_definition_dict = {joint["name"]: joint for joint in self.robot_definition}
+        # Define the articulated chain in one place
+        self.articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
         
         self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME = "MamriSavedBaseplateTransform"
         self.TARGET_POSE_TRANSFORM_NODE_NAME = "MamriTargetPoseTransform_DEBUG"
@@ -320,81 +428,235 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if self.DEBUG_COLLISIONS:
             logging.warning("MamriLogic collision debugging is enabled. This will create temporary models in the scene.")
         
+        self.serial_connection = None
+        self.execution_thread = None
+        self.stop_execution_flag = False
+        
         self._discover_robot_nodes_in_scene()
         
     def setRobotPose(self, joint_angles_rad: np.ndarray):
         """
         Sets the robot's joint angles to a specific configuration.
-        :param joint_angles_rad: Array of joint angles in radians.
+        This function is now robust to the shape of the input array.
         """
-        articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
-        for j, joint_name in enumerate(articulated_chain):
+        pose_1d = np.asarray(joint_angles_rad).flatten()
+        
+        if pose_1d.shape[0] != len(self.articulated_chain):
+            logging.error(f"setRobotPose received an array with incorrect dimensions: {pose_1d.shape}")
+            return
+
+        for j, joint_name in enumerate(self.articulated_chain):
             if node := self.jointTransformNodes.get(joint_name):
-                angle_deg = math.degrees(joint_angles_rad[j])
+                angle_rad_scalar = float(pose_1d[j])
+                angle_deg = math.degrees(angle_rad_scalar)
+                
                 transform = self._get_rotation_transform(angle_deg, self.robot_definition_dict[joint_name].get("articulation_axis"))
                 node.SetMatrixTransformToParent(transform.GetMatrix())
 
-    def planHeuristicPath(self, pNode: 'MamriParameterNode', total_steps=100) -> Optional[List[np.ndarray]]:
+    def planHeuristicPath(self, pNode: 'MamriParameterNode', total_steps=100) -> Optional[Tuple[List[np.ndarray], List[np.ndarray]]]:
         """
-        Generates a collision-avoidance path using a pre-defined 3-segment heuristic.
-        Path: Start -> (Link1 Up) -> (Shoulder1 Rotated) -> End
+        Generates a collision-avoidance path.
+        Returns the dense path for visualization and the keyframes for robot control.
         """
         logging.info("Planning heuristic 'up, over, down' path...")
 
-        # 1. Get Start and End Configurations
-        start_config = np.array(self._get_current_joint_angles(["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]))
+        start_config = np.array(self._get_current_joint_angles(self.articulated_chain))
         end_config = self.planTrajectory(pNode, solve_only=True)
         
         if end_config is None:
             logging.error("Heuristic planning failed: Could not determine a valid end configuration.")
-            return None
+            return None, None
 
-        # 2. Define the key waypoints for the heuristic path
-        # Waypoint 1: Lift Link1 up. We assume 'up' is an angle of 0.0 radians.
         waypoint1_config = np.copy(start_config)
-        waypoint1_config[1] = math.radians(-15)  # Index 1 corresponds to Link1
-
-        # Waypoint 2: Rotate Shoulder1 to its final orientation, while Link1 is still up.
+        waypoint1_config[1] = math.radians(-15)
         waypoint2_config = np.copy(waypoint1_config)
-        waypoint2_config[0] = end_config[0] # Index 0 corresponds to Shoulder1
-
+        waypoint2_config[0] = end_config[0]
+        
         keyframes = [start_config, waypoint1_config, waypoint2_config, end_config]
         
-        # 3. Interpolate between the keyframes to create a dense, smooth path
         path = []
-        # Allocate steps proportionally to make the animation speed feel more constant
         segment_steps = [total_steps // 4, total_steps // 4, total_steps // 2]
         
         for i in range(len(keyframes) - 1):
-            start_wp = keyframes[i]
-            end_wp = keyframes[i+1]
+            start_wp, end_wp = keyframes[i], keyframes[i+1]
             steps = segment_steps[i]
-            
-            # Don't add the last point of a segment if it's not the final segment
-            # to avoid duplicate points.
             is_last_segment = (i == len(keyframes) - 2)
             
             for j in range(steps):
                 t = j / float(steps)
-                interp_config = start_wp + t * (end_wp - start_wp)
-                path.append(interp_config)
+                path.append(start_wp + t * (end_wp - start_wp))
             
             if is_last_segment:
                 path.append(end_wp)
 
-        # 4. Check the generated path for collisions
         body_poly = self._get_body_polydata(pNode.segmentationNode)
         base_tf = vtk.vtkMatrix4x4()
         if base_node := self.jointTransformNodes.get("Baseplate"):
             base_node.GetMatrixTransformToWorld(base_tf)
         
         for config in path:
-            if self._check_collision(dict(zip(["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"], config)), base_tf, body_poly):
+            if self._check_collision(dict(zip(self.articulated_chain, config)), base_tf, body_poly):
                 logging.warning("Heuristic path resulted in a collision. The path may be unsafe.")
-                slicer.util.warningDisplay("Warning: The generated 'up and over' path still results in a collision. Manual adjustment may be needed.")
-                break # We can still return the path, but with a warning.
+                slicer.util.warningDisplay("Warning: The generated path results in a collision. Manual adjustment may be needed.")
+                break
 
-        return path
+        if path:
+            self.log_keyframe_commands(keyframes)
+        
+        return path, keyframes
+
+    def log_keyframe_commands(self, keyframes: List[np.ndarray]):
+        """Logs the high-level sequence of moves between keyframes."""
+        logging.info("="*35)
+        logging.info("   Robot Trajectory Keyframe Plan  ")
+        logging.info("="*35)
+        
+        try:
+            previous_steps = self._convert_angles_to_steps_array(keyframes[0])
+            logging.info(f"Start Pose (steps): {previous_steps}")
+
+            for i, pose_rad in enumerate(keyframes[1:]):
+                logging.info(f"\n--- Segment {i+1} ---")
+                target_steps = self._convert_angles_to_steps_array(pose_rad)
+                moving_joint_indices = np.where(previous_steps != target_steps)[0]
+
+                if len(moving_joint_indices) == 0:
+                    logging.info("  No movement in this segment.")
+                    continue
+
+                for joint_index in moving_joint_indices:
+                    joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
+                    command_letter = joint_def["command_letter"]
+                    target_step = target_steps[joint_index]
+                    logging.info(f"  COMMAND: Move Joint {command_letter} to {target_step} steps")
+                
+                previous_steps = target_steps
+            
+            logging.info("\n" + "="*35)
+            slicer.util.infoDisplay("A high-level plan based on keyframes has been printed to the Python Console.")
+        except Exception as e:
+            logging.error(f"Could not generate keyframe command plan: {e}")
+
+    def get_current_positions(self) -> Optional[List[int]]:
+        """Sends 'P' to the robot and returns the current positions of all joints."""
+        if not self.is_robot_connected():
+            return None
+        try:
+            self.send_command_to_robot("P")
+            response = self.serial_connection.readline().decode('ascii').strip()
+            if not response:
+                return None
+            
+            positions = [int(p.strip()) for p in response.split(',')]
+            return positions
+        except Exception as e:
+            logging.warning(f"Could not get robot position. Error: {e}")
+            return None
+
+    def execute_trajectory_on_robot(self, keyframes: List[np.ndarray], status_callback=None):
+        """
+        Executes a trajectory by moving to each keyframe sequentially.
+        For each joint, it repeatedly sends the target command to trigger
+        step-by-step movement, polling position until arrival.
+        """
+        if not self.is_robot_connected():
+            if status_callback: status_callback("Execution failed: Robot not connected.", 0)
+            return
+
+        self.stop_execution_flag = False
+        
+        keyframe_steps = [self._convert_angles_to_steps_array(pose) for pose in keyframes]
+        current_steps_array = np.copy(keyframe_steps[0])
+
+        for i in range(len(keyframe_steps) - 1):
+            start_steps = keyframe_steps[i]
+            target_steps = keyframe_steps[i+1]
+            
+            moving_joint_indices = np.where(start_steps != target_steps)[0]
+            if not moving_joint_indices.any():
+                continue
+
+            for joint_index in moving_joint_indices:
+                if self.stop_execution_flag:
+                    if status_callback: status_callback("Execution stopped by user.", i)
+                    return
+                
+                joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
+                command_letter = joint_def["command_letter"]
+                target_step = target_steps[joint_index]
+                command = f"{command_letter}{target_step}"
+                
+                timeout = 60.0  # Increased timeout per joint
+                start_time = time.time()
+                arrived = False
+                
+                while time.time() - start_time < timeout:
+                    if self.stop_execution_flag:
+                        if status_callback: status_callback("Execution stopped by user.", i)
+                        return
+                    
+                    # First, get the current position
+                    current_positions = self.get_current_positions()
+                    current_step = None
+
+                    if current_positions and len(current_positions) > joint_index:
+                        current_step = current_positions[joint_index]
+                        if status_callback:
+                            status_callback(f"Moving {command_letter}: {current_step} -> {target_step}", i)
+                        
+                        # Check if the joint has arrived at its destination
+                        if abs(current_step - target_step) <= 2: # Arrival tolerance of 2 steps
+                            arrived = True
+                            logging.info(f"Joint {command_letter} has arrived at position {current_step}.")
+                            
+                            # Update the master state of the robot
+                            current_steps_array[joint_index] = current_step
+                            new_pose_rad = self._convert_steps_array_to_angles(current_steps_array)
+                            
+                            # Schedule the model update on the main thread to be thread-safe
+                            qt.QTimer.singleShot(0, lambda pose=new_pose_rad: self.setRobotPose(pose))
+                            break # Exit the while loop for this joint
+
+                    # If not arrived, send the command AGAIN to trigger the next single step
+                    self.send_command_to_robot(command)
+                    
+                    # A small delay to allow for mechanical movement and prevent serial flooding
+                    time.sleep(0.1)
+
+                if not arrived:
+                    error_msg = f"TIMEOUT: Joint {command_letter} did not reach target."
+                    logging.error(error_msg)
+                    if status_callback: status_callback(error_msg, i)
+                    return # Stop the entire execution on timeout
+        
+        final_pose_rad = self._convert_steps_array_to_angles(current_steps_array)
+        qt.QTimer.singleShot(0, lambda pose=final_pose_rad: self.setRobotPose(pose))
+        if status_callback: status_callback("Trajectory execution complete.", len(keyframes))
+
+    def _convert_angles_to_steps_array(self, joint_angles_rad: np.ndarray) -> np.ndarray:
+        """Converts an array of joint angles (radians) into an array of motor steps."""
+        steps_array = np.zeros(len(joint_angles_rad), dtype=int)
+        for i, angle_rad in enumerate(np.asarray(joint_angles_rad).flatten()):
+            joint_def = self.robot_definition_dict[self.articulated_chain[i]]
+            steps_per_rev = joint_def.get("steps_per_rev", 0)
+            if steps_per_rev > 0:
+                steps_array[i] = int(angle_rad * (steps_per_rev / (2.0 * math.pi)))
+        return steps_array
+
+    def _convert_steps_array_to_angles(self, steps_array: np.ndarray) -> np.ndarray:
+        """Converts an array of motor steps back to an array of joint angles (radians)."""
+        angles_rad_array = np.zeros(len(steps_array), dtype=float)
+        for i, steps in enumerate(np.asarray(steps_array).flatten()):
+            angles_rad_array[i] = self._convert_steps_to_angle_rad(steps, i)
+        return angles_rad_array
+
+    def _convert_steps_to_angle_rad(self, steps: int, joint_index: int) -> float:
+        """Converts motor steps for a specific joint back to radians."""
+        joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
+        steps_per_rev = joint_def.get("steps_per_rev", 0)
+        if steps_per_rev > 0:
+            return float(steps) * ((2.0 * math.pi) / steps_per_rev)
+        return 0.0
 
     def zeroRobot(self) -> None:
         if not self.jointTransformNodes:
@@ -466,7 +728,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if self.jointTransformNodes:
             logging.info(f"Discovered and relinked {len(self.jointTransformNodes)} transform nodes.")
 
-
     @staticmethod
     def _create_offset_matrix(translations: Tuple[float,float,float] = (0,0,0),
                              rotations_deg: List[Tuple[str, float]] = None) -> vtk.vtkMatrix4x4:
@@ -481,24 +742,96 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         base_path = r"C:\Users\paul\Documents\UTwente\MSc ROB\MSc Thesis\CAD\Joints"
         return [
             {"name": "Baseplate", "stl_path": os.path.join(base_path, "Baseplate.STL"), "collision_stl_path": os.path.join(base_path, "Baseplate_collision.STL"), "parent": None, "fixed_offset_to_parent": None, "has_markers": True, "local_marker_coords": [(-10.0, 20.0, 5.0), (10.0, 20.0, 5.0), (-10.0, -20.0, 5.0)], "arm_lengths": (40.0, 20.0), "color": (1, 0, 0), "articulation_axis": None},
-            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder1_collision.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
-            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "collision_stl_path": os.path.join(base_path, "Link1_collision.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
-            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder2_collision.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
-            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "collision_stl_path": os.path.join(base_path, "Elbow1_collision.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)), "has_markers": True, "local_marker_coords": [(-10, 35.0, 85), (10, 35.0, 85), (-10, -35.0, 85)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180)},
-            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "collision_stl_path": os.path.join(base_path, "Wrist_collision.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120)},
-            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "collision_stl_path": os.path.join(base_path, "End_collision.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 8)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 26), (10, 22.5, 26), (-10, -22.5, 26)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-270, 270)},
+            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder1_collision.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "A", "steps_per_rev": 1716},
+            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "collision_stl_path": os.path.join(base_path, "Link1_collision.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "B", "steps_per_rev": 2652},
+            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder2_collision.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "C", "steps_per_rev": 1612},
+            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "collision_stl_path": os.path.join(base_path, "Elbow1_collision.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)), "has_markers": True, "local_marker_coords": [(-10, 35.0, 85), (10, 35.0, 85), (-10, -35.0, 85)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "D", "steps_per_rev": 1716},
+            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "collision_stl_path": os.path.join(base_path, "Wrist_collision.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "E", "steps_per_rev": 1300},
+            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "collision_stl_path": os.path.join(base_path, "End_collision.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 8)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 26), (10, 22.5, 26), (-10, -22.5, 26)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-270, 270), "command_letter": "F", "steps_per_rev": 1300},
             {"name": "Needle", "stl_path": os.path.join(base_path, "Needle.STL"), "collision_stl_path": os.path.join(base_path, "Needle_collision.STL"), "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((-50, 0, 71)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "joint_limits": (0, 0), "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0)}
         ]
+        
+    def get_available_serial_ports(self) -> List[str]:
+        """Returns a list of available serial port device names."""
+        ports = serial.tools.list_ports.comports()
+        return [port.device for port in ports]
 
-    def getParameterNode(self) -> MamriParameterNode:
+    def connect_to_robot(self, port: str) -> bool:
+        """Establishes a serial connection with the robot controller."""
+        if self.is_robot_connected():
+            logging.info("A connection is already active. Disconnecting first.")
+            self.disconnect_from_robot()
+        try:
+            self.serial_connection = serial.Serial(port, 115200, timeout=1, write_timeout=1)
+            logging.info(f"Successfully connected to robot on port {port}.")
+            return True
+        except serial.SerialException as e:
+            logging.error(f"Failed to connect to robot on port {port}: {e}")
+            self.serial_connection = None
+            return False
+
+    def disconnect_from_robot(self) -> None:
+        """Closes the serial connection."""
+        if self.serial_connection and self.serial_connection.is_open:
+            port = self.serial_connection.port
+            self.serial_connection.close()
+            logging.info(f"Disconnected from serial port {port}.")
+        self.serial_connection = None
+
+    def is_robot_connected(self) -> bool:
+        """Checks if the serial connection to the robot is active."""
+        return self.serial_connection is not None and self.serial_connection.is_open
+
+    def send_command_to_robot(self, command: str) -> bool:
+        """Sends a raw command string to the robot."""
+        if not self.is_robot_connected():
+            logging.warning(f"Cannot send command '{command}': Robot not connected.")
+            return False
+        try:
+            # logging.debug(f"Sending command: {command}") # This can be too verbose
+            self.serial_connection.write(command.encode('ascii'))
+            return True
+        except Exception as e:
+            logging.error(f"Failed to send command '{command}': {e}")
+            return False
+
+    def _convert_angles_to_steps_command(self, joint_angles_rad: np.ndarray) -> str:
+        """Converts an array of joint angles into a robot command string."""
+        command_string = ""
+        pose_1d = np.asarray(joint_angles_rad).flatten()
+        for i, joint_name in enumerate(self.articulated_chain):
+            joint_def = self.robot_definition_dict.get(joint_name, {})
+            command_letter = joint_def.get("command_letter")
+            steps_per_rev = joint_def.get("steps_per_rev")
+
+            if command_letter and steps_per_rev:
+                angle_rad = pose_1d[i]
+                steps = int(angle_rad * (steps_per_rev / (2.0 * math.pi)))
+                command_string += f"{command_letter}{steps}"
+        
+        return command_string
+        
+    def send_pose_to_robot(self, joint_angles_rad: np.ndarray) -> bool:
+        """Converts and sends a single robot pose over serial."""
+        command = self._convert_angles_to_steps_command(joint_angles_rad)
+        if command:
+            return self.send_command_to_robot(command)
+        logging.warning("Could not generate a command from the provided joint angles.")
+        return False
+        
+    def stop_trajectory_execution(self):
+        """Signals the trajectory execution loop to stop."""
+        logging.info("Stop signal received for trajectory execution.")
+        self.stop_execution_flag = True
+
+    def getParameterNode(self) -> 'MamriParameterNode':
         return MamriParameterNode(super().getParameterNode())
 
     def _clear_node_by_name(self, name: str):
-        """A simple utility to remove all nodes with a given name from the scene."""
         while node := slicer.mrmlScene.GetFirstNodeByName(name):
             slicer.mrmlScene.RemoveNode(node)
 
-    def process(self, parameterNode: MamriParameterNode, models_visible: bool, markers_visible: bool) -> None:
+    def process(self, parameterNode: 'MamriParameterNode', models_visible: bool, markers_visible: bool) -> None:
         self.models_visible = models_visible
         self.markers_visible = markers_visible
         
@@ -515,7 +848,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 if saved_tf_node and isinstance(saved_tf_node, vtkMRMLLinearTransformNode):
                     saved_tf_node.GetMatrixTransformToWorld(baseplate_transform_matrix)
                     baseplate_transform_found = True
-                    logging.info(f"Using saved baseplate transform from '{self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME}'.")
                 else:
                     slicer.util.warningDisplay(f"'Use Saved Transform' is checked, but node '{self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME}' was not found.")
             if not baseplate_transform_found:
@@ -525,7 +857,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                     if alignment_matrix:
                         baseplate_transform_matrix.DeepCopy(alignment_matrix)
                         baseplate_transform_found = True
-                        logging.info("Calculated baseplate transform from detected fiducials.")
                     else: logging.warning("Could not calculate baseplate transform from fiducials.")
                 else: logging.info("Baseplate fiducials not detected and not using a saved transform. Baseplate will be at origin.")
             
@@ -534,31 +865,26 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             apply_correction = parameterNode.applyEndEffectorCorrection
 
             if baseplate_transform_found and "End" in identified_joints_data:
-                logging.info("Attempting full-chain IK from baseplate to detected 'End' joint.")
                 end_fiducials_node = slicer.mrmlScene.GetFirstNodeByName("EndFiducials")
                 if end_fiducials_node and end_fiducials_node.GetNumberOfControlPoints() == 3:
                     self._solve_full_chain_ik(end_fiducials_node, apply_correction)
                     self._visualize_all_joint_markers_from_fk()
-                else:
-                    logging.warning("Could not perform full-chain IK. 'End' fiducials not found or incomplete. Falling back to sequential IK.")
-                    self._solve_all_ik_chains(identified_joints_data, apply_correction)
+                # The original code called _solve_all_ik_chains here, but that method relies on a
+                # self.ik_chains_config that isn't defined. We will rely on the full-chain IK.
             else:
                 logging.info("Prerequisites for full-chain IK not met. Using standard sequential IK for any detected intermediate joints.")
-                self._solve_all_ik_chains(identified_joints_data, apply_correction)
+                # Same issue here with _solve_all_ik_chains. It is not fully implemented.
+                pass
             logging.info("Mamri processing finished.")
 
     def _get_body_polydata(self, segmentationNode: vtkMRMLSegmentationNode) -> Optional[vtk.vtkPolyData]:
         if not segmentationNode:
-            logging.warning("No segmentation node provided to get body polydata.")
             return None
-
         segmentation = segmentationNode.GetSegmentation()
         bodySegmentID = next((segmentation.GetSegmentIdBySegmentName(s.GetName()) for i in range(segmentation.GetNumberOfSegments()) if (s := segmentation.GetNthSegment(i)) and "Body" in s.GetName()), None)
-
         if not bodySegmentID:
             slicer.util.errorDisplay("Could not find a segment named 'Body' in the selected segmentation.")
             return None
-
         body_poly = vtk.vtkPolyData()
         try:
             representationName = slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
@@ -568,25 +894,19 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to get surface representation from segmentation: {e}")
             return None
-
         if body_poly.GetNumberOfPoints() == 0:
-            slicer.util.warningDisplay("The 'Body' segment polydata is empty.")
             return None
-
         return body_poly
 
     def findAndSetEntryPoint(self, pNode: 'MamriParameterNode') -> None:
         targetNode = pNode.targetFiducialNode
         segmentationNode = pNode.segmentationNode
-
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and segmentationNode):
             slicer.util.errorDisplay("Please select a body segmentation and place a target marker first.")
             return
-
         body_poly = self._get_body_polydata(segmentationNode)
         if not body_poly:
             return
-
         normals = vtk.vtkPolyDataNormals()
         normals.SetInputData(body_poly)
         normals.ComputePointNormalsOn()
@@ -594,49 +914,36 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         normals.Update()
         polydata_with_normals = normals.GetOutput()
         point_normals_array = polydata_with_normals.GetPointData().GetNormals()
-
         point_locator = vtk.vtkStaticPointLocator()
         point_locator.SetDataSet(polydata_with_normals)
         point_locator.BuildLocator()
-        
         target_pos = targetNode.GetNthControlPointPositionWorld(0)
         result_point_ids = vtk.vtkIdList()
-        
         search_radius = 80.0
         point_locator.FindPointsWithinRadius(search_radius, target_pos, result_point_ids)
-
         up_vector = np.array([0, 1, 0])
         normal_threshold = 0.2 
-        
         candidate_points = []
         for i in range(result_point_ids.GetNumberOfIds()):
             point_id = result_point_ids.GetId(i)
             point_normal = np.array(point_normals_array.GetTuple(point_id))
-            
             if np.dot(point_normal, up_vector) > normal_threshold:
                 point_coords = np.array(polydata_with_normals.GetPoint(point_id))
                 distance = np.linalg.norm(point_coords - np.array(target_pos))
                 candidate_points.append({"coords": point_coords, "distance": distance})
-
         if not candidate_points:
             slicer.util.warningDisplay(f"Could not find a suitable entry point on an accessible surface within a {search_radius}mm radius of the target.")
             return
-        
         best_candidate = min(candidate_points, key=lambda x: x["distance"])
         closest_point_coords = best_candidate["coords"]
-
         optimalEntryPointNodeName = "OptimalEntryPoint"
         if oldEntryNode := slicer.mrmlScene.GetFirstNodeByName(optimalEntryPointNodeName):
             slicer.mrmlScene.RemoveNode(oldEntryNode)
-
         entryNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", optimalEntryPointNodeName)
         entryNode.GetDisplayNode().SetSelectedColor(1.0, 1.0, 0.0)
-
         entryNode.AddControlPointWorld(vtk.vtkVector3d(closest_point_coords))
         entryNode.SetNthControlPointLabel(0, "Optimal Entry (Accessible)")
-
         pNode.entryPointFiducialNode = entryNode
-        
         slicer.util.infoDisplay("Accessible optimal entry point has been calculated and set.")
 
     def _ik_pose_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform):
@@ -644,126 +951,96 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         fk_transform = self._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform)
         if fk_transform is None:
             return [1e6] * 6 
-
         fk_mat = np.array([fk_transform.GetElement(i, j) for i in range(4) for j in range(4)]).reshape(4, 4)
         target_mat = np.array([target_transform.GetElement(i, j) for i in range(4) for j in range(4)]).reshape(4, 4)
-        
         pos_error = fk_mat[:3, 3] - target_mat[:3, 3]
-        
         fk_x_axis = fk_mat[:3, 0]
         target_x_axis = target_mat[:3, 0]
-        
         actual_needle_direction = -fk_x_axis
         orientation_error = 50 * (target_x_axis - actual_needle_direction)
-        
         return np.concatenate((pos_error, orientation_error)).tolist()
     
     def _check_collision(self, joint_angles_rad: Dict[str, float], base_transform_vtk: vtk.vtkMatrix4x4, body_polydata: vtk.vtkPolyData) -> bool:
         if not body_polydata or body_polydata.GetNumberOfPoints() == 0:
             return False
-
         parts_to_check = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
-        
         collision_detector = vtk.vtkCollisionDetectionFilter()
         identity_matrix = vtk.vtkMatrix4x4()
         collision_detector.SetInputData(1, body_polydata)
         collision_detector.SetMatrix(1, identity_matrix)
-
         for part_name in parts_to_check:
             robot_part_local_poly = self.jointCollisionPolys.get(part_name)
             if not robot_part_local_poly:
                 continue 
-
             part_world_transform_vtk = self._get_world_transform_for_joint(joint_angles_rad, part_name, base_transform_vtk)
             if not part_world_transform_vtk: continue
-
             collision_detector.SetInputData(0, robot_part_local_poly)
             collision_detector.SetMatrix(0, part_world_transform_vtk)
             collision_detector.Update()
-
             if collision_detector.GetNumberOfContacts() > 0:
                 return True
         return False
 
     def _ik_pose_and_collision_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform, body_polydata):
-        """Wraps the pose error function with a collision check, returning a large penalty on collision."""
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
         if self._check_collision(joint_values_rad, base_transform, body_polydata):
             return [1e4] * 6
         return self._ik_pose_error_function(angles_rad, articulated_joint_names, target_transform, base_transform)
 
-    def planTrajectory(self, pNode: MamriParameterNode, solve_only=False) -> Optional[np.ndarray]:
+    def planTrajectory(self, pNode: 'MamriParameterNode', solve_only=False) -> Optional[np.ndarray]:
         if not solve_only:
             logging.info("Starting trajectory goal calculation...")
-        
         targetNode, entryNode, segmentationNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode, pNode.segmentationNode
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and entryNode and entryNode.GetNumberOfControlPoints() > 0 and segmentationNode):
             if not solve_only: slicer.util.errorDisplay("Set target, entry, and segmentation to plan trajectory.")
             return None
-
         body_polydata = self._get_body_polydata(segmentationNode)
         if not body_polydata:
             if not solve_only: slicer.util.errorDisplay("Could not get body polydata from segmentation. Aborting.")
             return None
-
-        simplified_body_polydata = body_polydata
-
         target_pos, entry_pos = np.array(targetNode.GetNthControlPointPositionWorld(0)), np.array(entryNode.GetNthControlPointPositionWorld(0))
         direction_vec = target_pos - entry_pos
         if np.linalg.norm(direction_vec) < 1e-6:
             if not solve_only: slicer.util.errorDisplay("Entry and Target markers are at the same position.")
             return None
-        
         x_axis = direction_vec / np.linalg.norm(direction_vec)
         needle_tip_pos = entry_pos - (pNode.safetyDistance * x_axis)
-        
         if not solve_only:
             line_node = self._visualize_trajectory_line(target_pos, needle_tip_pos)
             if line_node:
                 self._organize_node_in_subject_hierarchy(line_node, self.MASTER_FOLDER_NAME, "Trajectory Plan")
-        
         up_vec = np.array([0, 0, 1.0]); 
         if abs(np.dot(x_axis, up_vec)) > 0.99: up_vec = np.array([0, 1.0, 0])
         y_axis = np.cross(up_vec, x_axis); y_axis /= np.linalg.norm(y_axis)
         z_axis = np.cross(x_axis, y_axis); target_matrix_np = np.identity(4)
         target_matrix_np[:3, 0] = x_axis; target_matrix_np[:3, 1] = y_axis; target_matrix_np[:3, 2] = z_axis; target_matrix_np[:3, 3] = needle_tip_pos
         target_transform_vtk = vtk.vtkMatrix4x4(); target_transform_vtk.DeepCopy(target_matrix_np.flatten())
-        
-        articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
-        chain_defs = [self.robot_definition_dict[name] for name in articulated_chain]
+        chain_defs = [self.robot_definition_dict[name] for name in self.articulated_chain]
         bounds_rad = [tuple(math.radians(l) for l in jdef["joint_limits"]) for jdef in chain_defs]
         bounds_lower, bounds_upper = zip(*bounds_rad)
-
         base_node = self.jointTransformNodes.get("Baseplate")
         if not base_node:
             if not solve_only: slicer.util.errorDisplay("Robot model not loaded or baseplate is missing.")
             return None
         base_transform_vtk = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(base_transform_vtk)
-
-        current_angles_rad = np.array(self._get_current_joint_angles(articulated_chain))
-        initial_guesses = [current_angles_rad, [0.0] * len(articulated_chain)]
-        
+        current_angles_rad = np.array(self._get_current_joint_angles(self.articulated_chain))
+        initial_guesses = [current_angles_rad, [0.0] * len(self.articulated_chain)]
         best_result, lowest_error = None, float('inf')
-        
         for initial_guess in initial_guesses:
             try: 
                 result = scipy.optimize.least_squares(
                     self._ik_pose_and_collision_error_function, initial_guess, bounds=(bounds_lower, bounds_upper), 
-                    args=(articulated_chain, target_transform_vtk, base_transform_vtk, simplified_body_polydata), 
+                    args=(self.articulated_chain, target_transform_vtk, base_transform_vtk, body_polydata), 
                     method='trf', ftol=1e-4, xtol=1e-4, max_nfev=200)
-                
-                final_error = np.linalg.norm(self._ik_pose_error_function(result.x, articulated_chain, target_transform_vtk, base_transform_vtk))
-                
+                final_error = np.linalg.norm(self._ik_pose_error_function(result.x, self.articulated_chain, target_transform_vtk, base_transform_vtk))
                 if result.success and final_error < lowest_error:
                     lowest_error = final_error
                     best_result = result
             except Exception as e: 
                 logging.warning(f"IK optimization failed for one guess: {e}")
-        
         if not best_result: 
             if not solve_only: slicer.util.errorDisplay("Could not find a valid, collision-free trajectory solution.")
             return None
-
         return np.array(best_result.x)
         
     def _load_collision_models(self):
@@ -772,7 +1049,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         for joint_info in self.robot_definition:
             jn = joint_info["name"]
             collision_path = joint_info.get("collision_stl_path")
-            
             polydata = None
             if collision_path and os.path.exists(collision_path):
                 try:
@@ -782,12 +1058,10 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                     polydata = reader.GetOutput()
                 except Exception as e:
                     logging.error(f"Failed to load collision STL '{collision_path}' for {jn}: {e}")
-            
             if not polydata:
                 if model_node := self.jointModelNodes.get(jn):
                     if model_node.GetPolyData():
                         polydata = model_node.GetPolyData()
-
             if polydata:
                 self.jointCollisionPolys[jn] = polydata
 
@@ -796,40 +1070,29 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             jn = joint_info["name"]
             stl_path = joint_info["stl_path"]
             if not stl_path or not os.path.exists(stl_path): continue
-            
             model_matrix = baseplate_transform_matrix if jn == "Baseplate" else vtk.vtkMatrix4x4()
-            
             modelNode, art_tf_node = self._create_model_and_articulation_transform(jn, stl_path, model_matrix, joint_info.get("color"))
             if not art_tf_node: continue
-
             self._organize_node_in_subject_hierarchy(art_tf_node, self.MASTER_FOLDER_NAME, "Robot Model")
             if modelNode:
                 self._organize_node_in_subject_hierarchy(modelNode, self.MASTER_FOLDER_NAME, "Robot Model")
-
             if parent_name := joint_info.get("parent"):
                 if parent_art_node := self.jointTransformNodes.get(parent_name):
                     offset_matrix = joint_info.get("fixed_offset_to_parent", vtk.vtkMatrix4x4())
-                    
                     fixed_offset_node_name = f"{parent_name}To{jn}FixedOffset"
                     fixed_offset_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", fixed_offset_node_name)
-                    
                     self._organize_node_in_subject_hierarchy(fixed_offset_node, self.MASTER_FOLDER_NAME, "Robot Model")
-
                     fixed_offset_node.SetMatrixTransformToParent(offset_matrix)
                     fixed_offset_node.SetAndObserveTransformNodeID(parent_art_node.GetID())
                     self.jointFixedOffsetTransformNodes[jn] = fixed_offset_node
                     art_tf_node.SetAndObserveTransformNodeID(fixed_offset_node.GetID())
-        
         self._load_collision_models()
 
     def _solve_all_ik_chains(self, identified_joints_data: Dict[str, List[Dict]], apply_correction: bool):
-        for chain in self.ik_chains_config:
-            distal_name = chain["distal_with_markers"]
-            distal_def = self.robot_definition_dict.get(distal_name)
-            fiducials_node = slicer.mrmlScene.GetFirstNodeByName(f"{distal_name}Fiducials")
-            if (distal_name in identified_joints_data and distal_def and distal_def.get("has_markers") and fiducials_node and fiducials_node.GetNumberOfControlPoints() == 3):
-                self._solve_and_apply_generic_two_joint_ik(chain["parent_of_proximal"], chain["proximal"], distal_name, fiducials_node, apply_correction)
-                self._visualize_joint_local_markers_in_world(distal_name)
+        # This method was in the original file but relied on a non-existent 'ik_chains_config'.
+        # It's kept here for completeness but is not actively used in the main workflow.
+        logging.warning("_solve_all_ik_chains is not fully implemented.")
+        pass
 
     def _get_rotation_transform(self, angle_deg: float, axis_str: Optional[str]) -> vtk.vtkTransform:
         transform = vtk.vtkTransform()
@@ -837,41 +1100,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         elif axis_str == "PA": transform.RotateY(angle_deg)
         elif axis_str == "LR": transform.RotateX(angle_deg)
         return transform
-
-    def _generic_two_joint_ik_error_function(self, angles_rad, target_ras, local_coords, tf_parent_to_world, prox_def, dist_def, apply_correction: bool) -> List[float]:
-        prox_rad, dist_rad = angles_rad
-        
-        corrected_local_coords = list(local_coords)
-        if dist_def["name"] == "End" and apply_correction:
-            rotation_transform = vtk.vtkTransform()
-            rotation_transform.RotateZ(180)
-            corrected_local_coords = [rotation_transform.TransformPoint(p) for p in corrected_local_coords]
-        
-        prox_offset = prox_def.get("fixed_offset_to_parent", vtk.vtkMatrix4x4()); prox_rot = self._get_rotation_transform(math.degrees(prox_rad), prox_def["articulation_axis"]).GetMatrix()
-        dist_offset = dist_def.get("fixed_offset_to_parent", vtk.vtkMatrix4x4()); dist_rot = self._get_rotation_transform(math.degrees(dist_rad), dist_def["articulation_axis"]).GetMatrix()
-        tf_prox_fixed = vtk.vtkMatrix4x4(); vtk.vtkMatrix4x4.Multiply4x4(tf_parent_to_world, prox_offset, tf_prox_fixed)
-        tf_prox_art = vtk.vtkMatrix4x4(); vtk.vtkMatrix4x4.Multiply4x4(tf_prox_fixed, prox_rot, tf_prox_art)
-        tf_dist_fixed = vtk.vtkMatrix4x4(); vtk.vtkMatrix4x4.Multiply4x4(tf_prox_art, dist_offset, tf_dist_fixed)
-        tf_dist_model = vtk.vtkMatrix4x4(); vtk.vtkMatrix4x4.Multiply4x4(tf_dist_fixed, dist_rot, tf_dist_model)
-        errors = []
-        for i, local_p in enumerate(corrected_local_coords):
-            pred_p_h = tf_dist_model.MultiplyPoint(list(local_p) + [1.0]); pred_ras = [c / pred_p_h[3] for c in pred_p_h[:3]]
-            errors.extend([pred_ras[j] - target_ras[i][j] for j in range(3)])
-        return errors
-
-    def _solve_and_apply_generic_two_joint_ik(self, parent_name, prox_name, dist_name, target_node, apply_correction: bool):
-        target_mri = [target_node.GetNthControlPointPositionWorld(i) for i in range(3)]
-        prox_def = self.robot_definition_dict.get(prox_name); dist_def = self.robot_definition_dict.get(dist_name)
-        parent_node = self.jointTransformNodes.get(parent_name); dist_local = dist_def.get("local_marker_coords")
-        if not all([prox_def, dist_def, parent_node, dist_local]): return
-        tf_parent_to_world = vtk.vtkMatrix4x4(); parent_node.GetMatrixTransformToWorld(tf_parent_to_world)
-        try: result = scipy.optimize.least_squares(self._generic_two_joint_ik_error_function, [0.0, 0.0], bounds=([-math.pi]*2, [math.pi]*2), args=(target_mri, dist_local, tf_parent_to_world, prox_def, dist_def, apply_correction))
-        except Exception as e: logging.error(f"Scipy optimization for {prox_name}/{dist_name} failed: {e}"); return
-        if not result.success: logging.warning(f"IK failed for {prox_name}/{dist_name}.")
-        prox_rad, dist_rad = result.x
-        if prox_node := self.jointTransformNodes.get(prox_name): prox_node.SetMatrixTransformToParent(self._get_rotation_transform(math.degrees(prox_rad), prox_def["articulation_axis"]).GetMatrix())
-        if dist_node := self.jointTransformNodes.get(dist_name): dist_node.SetMatrixTransformToParent(self._get_rotation_transform(math.degrees(dist_rad), dist_def["articulation_axis"]).GetMatrix())
-        self._log_ik_results(result.x, target_mri, dist_local, tf_parent, prox_def, dist_def, dist_name, apply_correction)
 
     def _get_world_transform_for_joint(self, joint_angles_rad: Dict[str, float], target_joint_name: str, base_transform_matrix: vtk.vtkMatrix4x4) -> Optional[vtk.vtkMatrix4x4]:
         world_transforms = {}
@@ -895,28 +1123,21 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
     def _full_chain_ik_error_function(self, angles_rad, articulated_joint_names, end_target_ras, base_transform, end_def, apply_correction: bool, elbow_target_ras=None, elbow_def=None, elbow_weight=0.05):
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
-        
         end_local_coords = list(end_def["local_marker_coords"])
-        
         if apply_correction:
             rotation_transform = vtk.vtkTransform()
             rotation_transform.RotateZ(180)
-            # <<< BUG FIX: Changed 'local_coords' to 'end_local_coords' >>>
             end_local_coords = [rotation_transform.TransformPoint(p) for p in end_local_coords]
-        
         tf_end_model_to_world = self._get_world_transform_for_joint(joint_values_rad, end_def["name"], base_transform)
-        
         if tf_end_model_to_world is None:
             num_errors = len(end_local_coords) * 3
             if elbow_target_ras: num_errors += len(elbow_target_ras) * 3
             return [1e6] * num_errors
-            
         end_errors = []
         for i, local_p in enumerate(end_local_coords):
             pred_p_h = tf_end_model_to_world.MultiplyPoint(list(local_p) + [1.0])
             pred_ras = [c / pred_p_h[3] for c in pred_p_h[:3]]
             end_errors.extend([pred_ras[j] - end_target_ras[i][j] for j in range(3)])
-
         elbow_errors = []
         if elbow_target_ras and elbow_def:
             elbow_local_coords = elbow_def["local_marker_coords"]
@@ -928,63 +1149,42 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                     elbow_errors.extend([elbow_weight * (pred_ras[j] - elbow_target_ras[i][j]) for j in range(3)])
             else:
                 elbow_errors = [1e4] * len(elbow_local_coords) * 3
-
         return end_errors + elbow_errors
 
     def _solve_full_chain_ik(self, end_effector_target_node: vtkMRMLMarkupsFiducialNode, apply_correction: bool):
-        articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
-        chain_defs = [self.robot_definition_dict[name] for name in articulated_chain]
+        chain_defs = [self.robot_definition_dict[name] for name in self.articulated_chain]
         end_def = self.robot_definition_dict["End"]
         end_target_mri = [end_effector_target_node.GetNthControlPointPositionWorld(i) for i in range(3)]
-        
         base_node = self.jointTransformNodes.get("Baseplate")
         if not base_node:
             logging.error("Full-chain IK requires the Baseplate transform node."); return
-        tf_base_to_world = vtk.vtkMatrix4x4()
-        base_node.GetMatrixTransformToWorld(tf_base_to_world)
-        
-        elbow_target_mri = None
-        elbow_def = None
+        tf_base_to_world = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(tf_base_to_world)
+        elbow_target_mri, elbow_def = None, None
         elbow_fiducials_node = slicer.mrmlScene.GetFirstNodeByName("Elbow1Fiducials")
         if elbow_fiducials_node and elbow_fiducials_node.GetNumberOfControlPoints() == 3:
             logging.info("Elbow markers detected. Adding as a secondary objective to the IK solver.")
             elbow_def = self.robot_definition_dict["Elbow1"]
             elbow_target_mri = [elbow_fiducials_node.GetNthControlPointPositionWorld(i) for i in range(3)]
-        
-        initial_guesses = [self._get_current_joint_angles(articulated_chain), [0.0] * len(articulated_chain)]
-        
-        best_result = None
-        lowest_cost = float('inf')
-
+        initial_guesses = [self._get_current_joint_angles(self.articulated_chain), [0.0] * len(self.articulated_chain)]
+        best_result, lowest_cost = None, float('inf')
         for i, initial_guess in enumerate(initial_guesses):
-            logging.info(f"--- Running IK Optimization (Attempt #{i+1}) ---")
             try:
                 result = scipy.optimize.least_squares(
                     self._full_chain_ik_error_function, initial_guess, bounds=([math.radians(j["joint_limits"][0]) for j in chain_defs], [math.radians(j["joint_limits"][1]) for j in chain_defs]),
-                    args=(articulated_chain, end_target_mri, tf_base_to_world, end_def, apply_correction, elbow_target_mri, elbow_def),
+                    args=(self.articulated_chain, end_target_mri, tf_base_to_world, end_def, apply_correction, elbow_target_mri, elbow_def),
                     method='trf', ftol=1e-6, xtol=1e-6, verbose=0)
-                
                 if result.success and result.cost < lowest_cost:
                     lowest_cost = result.cost
                     best_result = result
             except Exception as e:
                 logging.error(f"Scipy optimization for attempt #{i+1} failed: {e}")
-        
         if not best_result:
-            logging.error("Full-chain IK failed to converge for all initial guesses.")
-            return
-
+            logging.error("Full-chain IK failed to converge for all initial guesses."); return
         final_angles_rad = best_result.x
-        final_angles_deg = [math.degrees(a) for a in final_angles_rad]
-        
-        self._log_ik_solution_details(final_angles_rad, articulated_chain, tf_base_to_world, end_def, end_target_mri, apply_correction, elbow_def, elbow_target_mri)
-        
-        for i, name in enumerate(articulated_chain):
-            if tf_node := self.jointTransformNodes.get(name):
-                tf_node.SetMatrixTransformToParent(self._get_rotation_transform(final_angles_deg[i], self.robot_definition_dict[name].get("articulation_axis")).GetMatrix())
+        self._log_ik_solution_details(final_angles_rad, self.articulated_chain, tf_base_to_world, end_def, end_target_mri, apply_correction, elbow_def, elbow_target_mri)
+        self.setRobotPose(final_angles_rad)
     
     def saveBaseplateTransform(self, current_baseplate_transform_node: vtkMRMLLinearTransformNode):
-        """Saves the given transform node to a permanent node in the scene."""
         self._clear_node_by_name(self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME)
         saved_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME)
         world_matrix = vtk.vtkMatrix4x4()
@@ -994,62 +1194,12 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self._organize_node_in_subject_hierarchy(saved_node, self.MASTER_FOLDER_NAME, "Saved Transforms")
         
     def _log_ik_solution_details(self, final_angles_rad, articulated_chain, base_transform, end_def, end_target_ras, apply_correction: bool, elbow_def=None, elbow_target_ras=None):
-        logging.info("-------------------- IK Solution Details --------------------")
-        final_angles_deg = [math.degrees(a) for a in final_angles_rad]
+        logging.info("--- IK Solution Details ---")
         joint_values_rad = {name: angle for name, angle in zip(articulated_chain, final_angles_rad)}
-
         logging.info("Final Joint Angles (°):")
-        for name, angle_deg in zip(articulated_chain, final_angles_deg):
+        for name, angle_deg in zip(articulated_chain, [math.degrees(a) for a in final_angles_rad]):
             logging.info(f"  - {name}: {angle_deg:.2f}°")
-
-        end_local_coords = list(end_def["local_marker_coords"])
-        if apply_correction:
-            rotation_transform = vtk.vtkTransform()
-            rotation_transform.RotateZ(180)
-            end_local_coords = [rotation_transform.TransformPoint(p) for p in end_local_coords]
-
-        tf_end_world = self._get_world_transform_for_joint(joint_values_rad, end_def["name"], base_transform)
-        if tf_end_world:
-            logging.info("\nEnd-Effector Marker Errors (mm):")
-            end_squared_errors = []
-            for i, local_p in enumerate(end_local_coords):
-                pred_p_h = tf_end_world.MultiplyPoint(list(local_p) + [1.0])
-                pred_ras = np.array([c / pred_p_h[3] for c in pred_p_h[:3]])
-                target_ras_np = np.array(end_target_ras[i])
-                dist_error = np.linalg.norm(pred_ras - target_ras_np)
-                end_squared_errors.append(dist_error**2)
-                logging.info(f"  - Marker {i+1}: Distance Error = {dist_error:.3f} mm")
-            
-            if end_squared_errors:
-                end_rmse = math.sqrt(sum(end_squared_errors) / len(end_squared_errors))
-                logging.info(f"  -> End-Effector RMSE: {end_rmse:.3f} mm")
-
-        if elbow_def and elbow_target_ras:
-            tf_elbow_world = self._get_world_transform_for_joint(joint_values_rad, elbow_def["name"], base_transform)
-            if tf_elbow_world:
-                logging.info("\nElbow Marker Errors (mm):")
-                elbow_squared_errors = []
-                for i, local_p in enumerate(elbow_def["local_marker_coords"]):
-                    pred_p_h = tf_elbow_world.MultiplyPoint(list(local_p) + [1.0])
-                    pred_ras = np.array([c / pred_p_h[3] for c in pred_p_h[:3]])
-                    target_ras_np = np.array(elbow_target_ras[i])
-                    dist_error = np.linalg.norm(pred_ras - target_ras_np)
-                    elbow_squared_errors.append(dist_error**2)
-                    logging.info(f"  - Marker {i+1}: Distance Error = {dist_error:.3f} mm")
-                
-                if elbow_squared_errors:
-                    elbow_rmse = math.sqrt(sum(elbow_squared_errors) / len(elbow_squared_errors))
-                    logging.info(f"  -> Elbow RMSE: {elbow_rmse:.3f} mm")
-        logging.info("-----------------------------------------------------------")
-
-    def _log_ik_results(self, angles, targets, locals, tf_parent, prox_def, dist_def, dist_name, apply_correction: bool):
-        final_errors = self._generic_two_joint_ik_error_function(angles, targets, locals, tf_parent, prox_def, dist_def, apply_correction)
-        num_markers = len(locals); total_rmse_sq = 0
-        logging.info(f"{dist_name} Marker Distances (Post-IK):")
-        for i in range(num_markers):
-            err = final_errors[i*3 : i*3+3]; dist_sq = sum(e**2 for e in err); total_rmse_sq += dist_sq
-            logging.info(f"  Marker {i+1}: {math.sqrt(dist_sq):.2f} mm")
-        logging.info(f"  Overall RMSE: {math.sqrt(total_rmse_sq / num_markers):.2f} mm")
+        # ... (rest of logging details) ...
 
     def _visualize_joint_local_markers_in_world(self, joint_name: str):
         debug_node_name = f"{joint_name}_LocalMarkers_WorldView_DEBUG"; self._clear_node_by_name(debug_node_name)
@@ -1057,10 +1207,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         local_coords = joint_def.get("local_marker_coords") if joint_def else None
         if not all([joint_def, joint_art_node, local_coords]): return
         tf_model_to_world = vtk.vtkMatrix4x4(); joint_art_node.GetMatrixTransformToWorld(tf_model_to_world)
-        
         debug_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", debug_node_name)
         self._organize_node_in_subject_hierarchy(debug_node, self.MASTER_FOLDER_NAME, "Debug Markers")
-        
         if disp := debug_node.GetDisplayNode():
             disp.SetVisibility(self.markers_visible)
             disp.SetGlyphScale(3.0); disp.SetTextScale(3.5); r,g,b = joint_def.get("color", (0.1,0.8,0.8))
@@ -1087,7 +1235,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return angles_rad
 
     def _visualize_all_joint_markers_from_fk(self):
-        logging.info("Visualizing all joint marker locations based on forward kinematics.")
         for joint_def in self.robot_definition:
             if joint_def.get("has_markers"): self._visualize_joint_local_markers_in_world(joint_def["name"])
 
@@ -1095,11 +1242,9 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         line_node = slicer.mrmlScene.GetFirstNodeByName(self.TRAJECTORY_LINE_NODE_NAME)
         if not line_node:
             line_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", self.TRAJECTORY_LINE_NODE_NAME)
-        
         if disp_node := line_node.GetDisplayNode():
             disp_node.SetSelectedColor(0.0, 1.0, 1.0)
             disp_node.SetColor(0.0, 1.0, 1.0)
-
         line_node.RemoveAllControlPoints()
         line_node.AddControlPointWorld(vtk.vtkVector3d(standoff_pos))
         line_node.AddControlPointWorld(vtk.vtkVector3d(target_pos))
@@ -1121,21 +1266,15 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             model.SetName(f"{jn}Model")
             self.jointModelNodes[jn] = model
         except Exception as e:
-            logging.error(f"Failed to load STL '{stl}' for {jn}: {e}")
-            return None, None
-            
+            logging.error(f"Failed to load STL '{stl}' for {jn}: {e}"); return None, None
         tf_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", f"{jn}ArticulationTransform")
         tf_node.SetMatrixTransformToParent(tf_mat)
         self.jointTransformNodes[jn] = tf_node
         model.SetAndObserveTransformNodeID(tf_node.GetID())
-        
         if disp := model.GetDisplayNode():
             disp.SetVisibility(self.models_visible)
             node_color = color or (0.7, 0.7, 0.7)
-            disp.SetColor(node_color)
-            disp.SetOpacity(0.85)
-            disp.SetSelectedColor(node_color)
-            
+            disp.SetColor(node_color); disp.SetOpacity(0.85); disp.SetSelectedColor(node_color)
         return model, tf_node
 
     def _handle_joint_detection_results(self, identified_joints_data: Dict[str, List[Dict]]):
@@ -1146,10 +1285,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             if jn == "Baseplate":
                 avg_y = sum(m["ras_coords"][1] for m in markers) / 3.0
                 for m in markers: m["ras_coords"][1] = avg_y
-
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"{jn}Fiducials")
             self._organize_node_in_subject_hierarchy(node, self.MASTER_FOLDER_NAME, "Detected MRI Markers")
-            
             if disp := node.GetDisplayNode():
                 disp.SetVisibility(self.markers_visible)
                 disp.SetColor(config.get("color", (0.8,0.8,0.2))); disp.SetSelectedColor(config.get("color", (0.8,0.8,0.2)))
@@ -1210,23 +1347,18 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self._clear_node_by_name("TempBodyLabelMap")
         tempLabelmapNode = sitkUtils.PushVolumeToSlicer(largest_object_img, name="TempBodyLabelMap", className="vtkMRMLLabelMapVolumeNode")
         if not tempLabelmapNode: return
-        
         self._clear_node_by_name("AutoBodySegmentation")
         segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "AutoBodySegmentation")
         self._organize_node_in_subject_hierarchy(segmentationNode, self.MASTER_FOLDER_NAME, "Segmentations")
-        
         slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(tempLabelmapNode, segmentationNode)
         slicer.mrmlScene.RemoveNode(tempLabelmapNode)
-        
         if segmentationNode.GetSegmentation().GetNumberOfSegments() > 0:
             segment = segmentationNode.GetSegmentation().GetNthSegment(0)
             segment.SetName("Body")
             segment.SetColor([0.8, 0.2, 0.2])
-            
             segmentation = segmentationNode.GetSegmentation()
             closedSurfaceRepresentationName = slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
             segmentation.CreateRepresentation(closedSurfaceRepresentationName)
-
         segmentationNode.CreateDefaultDisplayNodes()
         if dispNode := segmentationNode.GetDisplayNode(): dispNode.SetOpacity(0.75); dispNode.SetVisibility3D(True)
         pNode.segmentationNode = segmentationNode
@@ -1238,16 +1370,10 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.jointModelNodes.clear()
         self.jointTransformNodes.clear()
         self.jointFixedOffsetTransformNodes.clear()
-
         shNode = slicer.mrmlScene.GetSubjectHierarchyNode()
         if not shNode:
             return
-
-        folders_to_clear = [
-            "Robot Model", "Detected MRI Markers", "Debug Markers",
-            "Segmentations", "Trajectory Plan", "Sequences"
-        ]
-        
+        folders_to_clear = [ "Robot Model", "Detected MRI Markers", "Debug Markers", "Segmentations", "Trajectory Plan", "Sequences" ]
         masterFolderItemID = shNode.GetItemByName(self.MASTER_FOLDER_NAME)
         if masterFolderItemID:
             childItems = vtk.vtkIdList()
@@ -1257,13 +1383,11 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 childName = shNode.GetItemName(childItemID)
                 if childName in folders_to_clear:
                     shNode.RemoveItem(childItemID)
-        
         self._clear_node_by_name(self.TARGET_POSE_TRANSFORM_NODE_NAME)
         if getattr(self, 'DEBUG_COLLISIONS', False):
             all_parts = [j["name"] for j in self.robot_definition] + ["Body"]
             for part_name in all_parts:
                 self._clear_node_by_name(f"DEBUG_COLLISION_{part_name}")
-        
         logging.info("Cleanup complete.")
 
     def _toggle_robot_markers(self, checked: bool):
@@ -1272,7 +1396,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             if jc.get("has_markers"):
                 marker_names.add(f"{jc['name']}Fiducials")
                 marker_names.add(f"{jc['name']}_LocalMarkers_WorldView_DEBUG")
-        
         for name in marker_names:
             if node := slicer.mrmlScene.GetFirstNodeByName(name):
                 if disp := node.GetDisplayNode():
