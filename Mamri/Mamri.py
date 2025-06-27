@@ -4,9 +4,7 @@ import itertools
 import math
 from typing import Annotated, Optional, Dict, List, Tuple
 import time
-import threading
 
-# Imports for serial communication
 import serial
 import serial.tools.list_ports
 
@@ -32,8 +30,6 @@ from slicer import vtkMRMLModelNode
 from slicer import vtkMRMLLinearTransformNode
 from slicer import vtkMRMLSegmentationNode
 from slicer import vtkMRMLMarkupsFiducialNode
-from slicer import vtkMRMLLabelMapVolumeNode
-
 
 #
 # Mamri
@@ -64,6 +60,7 @@ class MamriParameterNode:
     targetFiducialNode: vtkMRMLMarkupsFiducialNode
     entryPointFiducialNode: vtkMRMLMarkupsFiducialNode
     safetyDistance: Annotated[float, WithinRange(0.0, 50.0)] = 5.0
+
 #
 # MamriWidget
 #
@@ -111,8 +108,6 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.playPauseButton.clicked.connect(self.onPlayPauseButton)
         if hasattr(self.ui, "moveToPoseButton"):
             self.ui.moveToPoseButton.clicked.connect(self.onMoveToPoseButton)
-
-        # New robot control widgets from the UI file
         if hasattr(self.ui, "refreshPortsButton"):
             self.ui.refreshPortsButton.clicked.connect(self.onRefreshPortsButton)
         if hasattr(self.ui, "connectButton"):
@@ -124,8 +119,6 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "returnToZeroButton"):
             self.ui.returnToZeroButton.clicked.connect(self.onReturnToZeroButton)
 
-        # --- Initialize logic, observers, and timers ---
-            
         self._animationTimer = qt.QTimer()
         self._animationTimer.setInterval(50)
         self._animationTimer.timeout.connect(self.doAnimationStep)
@@ -141,9 +134,8 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.removeObservers()
         if self._animationTimer:
             self._animationTimer.stop()
-        # Ensure disconnection on cleanup
         if self.logic and self.logic.is_robot_connected():
-            self.logic.stop_trajectory_execution() # Stop thread if running
+            self.logic.stop_trajectory_execution() 
             self.logic.disconnect_from_robot()
 
     def enter(self) -> None: 
@@ -1246,12 +1238,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                     self.jointFixedOffsetTransformNodes[jn] = fixed_offset_node
                     art_tf_node.SetAndObserveTransformNodeID(fixed_offset_node.GetID())
         self._load_collision_models()
-
-    def _solve_all_ik_chains(self, identified_joints_data: Dict[str, List[Dict]], apply_correction: bool):
-        # This method was in the original file but relied on a non-existent 'ik_chains_config'.
-        # It's kept here for completeness but is not actively used in the main workflow.
-        logging.warning("_solve_all_ik_chains is not fully implemented.")
-        pass
 
     def _get_rotation_transform(self, angle_deg: float, axis_str: Optional[str]) -> vtk.vtkTransform:
         transform = vtk.vtkTransform()
