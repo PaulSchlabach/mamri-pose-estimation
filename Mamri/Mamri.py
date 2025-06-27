@@ -4,6 +4,7 @@ import itertools
 import math
 from typing import Annotated, Optional, Dict, List, Tuple
 import time
+import json
 
 import serial
 import serial.tools.list_ports
@@ -476,9 +477,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.markers_visible = True
         self.debug_markers_visible = False
 
-        self.robot_definition = self._define_robot_structure()
+        self.robot_definition = self._load_robot_definition()
         self.robot_definition_dict = {joint["name"]: joint for joint in self.robot_definition}
-        # Define the articulated chain in one place
         self.articulated_chain = ["Shoulder1", "Link1", "Shoulder2", "Elbow1", "Wrist", "End"]
         
         self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME = "MamriSavedBaseplateTransform"
@@ -624,7 +624,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 status_label.text = message
             slicer.app.processEvents()
 
-        # 1. Synchronize with the robot's actual starting position
         update_gui("Reading initial robot position...")
         initial_robot_positions = self.get_current_positions()
         if initial_robot_positions is None:
@@ -635,7 +634,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         num_joints = len(self.articulated_chain)
         actual_start_steps = np.array(initial_robot_positions[:num_joints])
 
-        # 2. Define the full execution path, including the actual start
         planned_steps = [self._convert_angles_to_steps_array(pose) for pose in keyframes]
         full_path_steps = [actual_start_steps] + planned_steps
         
@@ -644,20 +642,15 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             if not unique_path_steps or not np.array_equal(unique_path_steps[-1], step_array):
                 unique_path_steps.append(step_array)
 
-        # --- NEW: DETAILED DIAGNOSTIC LOGGING ---
         try:
             log_messages = ["\n" + "="*51, "ROBOT TRAJECTORY DIAGNOSTICS".center(51), "="*51]
-            
-            # Log Initial State
             initial_angles_rad = self._convert_steps_array_to_angles(actual_start_steps)
             initial_angles_deg = np.round(np.degrees(initial_angles_rad), 2)
             log_messages.append("\n--- Initial State ---")
             log_messages.append(f"Actual Start (Steps): {actual_start_steps.tolist()}")
             log_messages.append(f"Actual Start (Deg):   {initial_angles_deg.tolist()}")
 
-            # Log Waypoints
             log_messages.append("\n--- Trajectory Waypoints ---")
-            # We skip unique_path_steps[0] as it's the actual start state, not a planned waypoint
             for i, waypoint_steps in enumerate(unique_path_steps[1:]):
                 waypoint_rads = self._convert_steps_array_to_angles(waypoint_steps)
                 waypoint_degs = np.round(np.degrees(waypoint_rads), 2)
@@ -669,13 +662,11 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             logging.info("\n".join(log_messages))
         except Exception as e:
             logging.error(f"Failed to generate diagnostic log: {e}")
-        # --- END OF NEW LOGGING CODE ---
 
         if len(unique_path_steps) < 2:
             update_gui("Robot is already at the target position.")
             return
 
-        # 3. Execute the synchronized path
         current_pose_steps = np.copy(actual_start_steps)
         for i, target_pose_steps in enumerate(unique_path_steps[1:]):
             if self.stop_execution_flag:
@@ -828,29 +819,51 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if self.jointTransformNodes:
             logging.info(f"Discovered and relinked {len(self.jointTransformNodes)} transform nodes.")
 
-    @staticmethod
-    def _create_offset_matrix(translations: Tuple[float,float,float] = (0,0,0),
-                             rotations_deg: List[Tuple[str, float]] = None) -> vtk.vtkMatrix4x4:
-        transform = vtk.vtkTransform()
-        if rotations_deg:
-            for axis, angle_deg in rotations_deg:
-                getattr(transform, f"Rotate{axis.upper()}")(angle_deg)
-        transform.Translate(translations)
-        return transform.GetMatrix()
+    def _load_robot_definition(self) -> List[Dict]:
+        """Loads the robot definition from an external JSON file and processes it."""
+        try:
+            module_name = self.__class__.__name__.replace('Logic', '')
+            module_path = slicer.util.modulePath(module_name)
+            module_dir = os.path.dirname(module_path)
 
-    def _define_robot_structure(self) -> List[Dict]:
-        base_path = r"C:\Users\paul\Documents\UTwente\MSc ROB\MSc Thesis\CAD\Joints"
-        return [
-            {"name": "Baseplate", "stl_path": os.path.join(base_path, "Baseplate.STL"), "collision_stl_path": os.path.join(base_path, "Baseplate_collision.STL"), "parent": None, "fixed_offset_to_parent": None, "has_markers": True, "local_marker_coords": [(-10.0, 20.0, 5.0), (10.0, 20.0, 5.0), (-10.0, -20.0, 5.0)], "arm_lengths": (40.0, 20.0), "color": (1, 0, 0), "articulation_axis": None},
-            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder1_collision.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "A", "steps_per_rev": 3332},
-            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "collision_stl_path": os.path.join(base_path, "Link1_collision.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "B", "steps_per_rev": 3332},
-            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder2_collision.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "C", "steps_per_rev": 3332},
-            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "collision_stl_path": os.path.join(base_path, "Elbow1_collision.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)), "has_markers": True, "local_marker_coords": [(-10, 35.0, 85), (10, 35.0, 85), (-10, -35.0, 85)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "D", "steps_per_rev": 3332},
-            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "collision_stl_path": os.path.join(base_path, "Wrist_collision.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "E", "steps_per_rev": 3332},
-            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "collision_stl_path": os.path.join(base_path, "End_collision.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 8)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 26), (10, 22.5, 26), (-10, -22.5, 26)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-270, 270), "command_letter": "F", "steps_per_rev": 3332},
-            {"name": "Needle", "stl_path": os.path.join(base_path, "Needle.STL"), "collision_stl_path": os.path.join(base_path, "Needle_collision.STL"), "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((-50, 0, 71)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "joint_limits": (0, 0), "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0)}
-        ]
-        
+        except Exception as e:
+            logging.error(f"Could not determine module path using slicer.util.modulePath: {e}")
+            try:
+                module_dir = os.path.dirname(__file__)
+            except NameError:
+                logging.error("Could not determine module path. Fallback failed.")
+                return []
+
+        base_path = os.path.join(module_dir, "Resources", "Robot")
+        config_path = os.path.join(module_dir, "Resources", "Robot", "robot_config.json")
+
+        if not os.path.exists(config_path):
+            logging.error(f"FATAL: Robot config file not found at {config_path}")
+            return []
+
+        with open(config_path, 'r') as f:
+            config_data = json.load(f)
+
+        for joint in config_data:
+            if joint.get("stl_path"):
+                joint["stl_path"] = os.path.join(base_path, joint["stl_path"])
+            if joint.get("collision_stl_path"):
+                joint["collision_stl_path"] = os.path.join(base_path, joint["collision_stl_path"])
+
+            offset_data = joint.get("fixed_offset_to_parent")
+            if isinstance(offset_data, dict):
+                transform = vtk.vtkTransform()
+                if 'translate' in offset_data:
+                    transform.Translate(offset_data['translate'])
+                if 'rotate' in offset_data:
+                    for axis, angle_deg in offset_data['rotate']:
+                        getattr(transform, f"Rotate{axis.upper()}", lambda a: None)(angle_deg)
+                joint["fixed_offset_to_parent"] = transform.GetMatrix()
+            else:
+                joint["fixed_offset_to_parent"] = None
+
+        return config_data
+    
     def get_available_serial_ports(self) -> List[str]:
         """Returns a list of available serial port device names."""
         ports = serial.tools.list_ports.comports()
