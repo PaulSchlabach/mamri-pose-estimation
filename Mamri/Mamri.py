@@ -78,10 +78,10 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._animationTimer = None
         self._isPlaying = False
         
-        # Attributes for trajectory and robot control
         self.trajectoryPath = None
         self.trajectoryKeyframes = None
-        self.robotExecutionThread = None
+        self._isExecuting = False 
+        self.lastEstimatedPoseSteps = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -89,9 +89,6 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
         
-        # --- Connect all UI widgets to handler functions ---
-        
-        # Existing widgets from the UI file
         if hasattr(self.ui, "applyButton"):
             self.ui.applyButton.connect("clicked(bool)", self.onApplyButton)
         if hasattr(self.ui, "planTrajectoryButton"):
@@ -106,10 +103,14 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.findEntryPointButton.connect("clicked(bool)", self.onFindEntryPointButton)
         if hasattr(self.ui, "zeroRobotButton"):
             self.ui.zeroRobotButton.connect("clicked(bool)", self.onZeroRobotButton)
+        if hasattr(self.ui, "drawDebugMarkersCheckBox"):
+            self.ui.drawDebugMarkersCheckBox.connect("toggled(bool)", self.onDrawDebugMarkersCheckBoxToggled)
         if hasattr(self.ui, "trajectorySlider"):
             self.ui.trajectorySlider.valueChanged.connect(self.onTrajectorySliderChanged)
         if hasattr(self.ui, "playPauseButton"):
             self.ui.playPauseButton.clicked.connect(self.onPlayPauseButton)
+        if hasattr(self.ui, "moveToPoseButton"):
+            self.ui.moveToPoseButton.clicked.connect(self.onMoveToPoseButton)
 
         # New robot control widgets from the UI file
         if hasattr(self.ui, "refreshPortsButton"):
@@ -120,6 +121,8 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.executeTrajectoryButton.clicked.connect(self.onExecuteTrajectoryButton)
         if hasattr(self.ui, "stopTrajectoryButton"):
             self.ui.stopTrajectoryButton.clicked.connect(self.onStopTrajectoryButton)
+        if hasattr(self.ui, "returnToZeroButton"):
+            self.ui.returnToZeroButton.clicked.connect(self.onReturnToZeroButton)
 
         # --- Initialize logic, observers, and timers ---
             
@@ -197,17 +200,17 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         model_is_built = self.logic and self.logic.jointTransformNodes.get("Baseplate") is not None
         
+        # The check for segmentationNode has been removed from this logic
         can_plan_base = (self._parameterNode and
                          self._parameterNode.targetFiducialNode and self._parameterNode.targetFiducialNode.GetNumberOfControlPoints() > 0 and
-                         self._parameterNode.entryPointFiducialNode and self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0 and
-                         self._parameterNode.segmentationNode)
+                         self._parameterNode.entryPointFiducialNode and self._parameterNode.entryPointFiducialNode.GetNumberOfControlPoints() > 0)
         
         if hasattr(self.ui, "planTrajectoryButton"):
             self.ui.planTrajectoryButton.enabled = can_plan_base and model_is_built
         
         if hasattr(self.ui, "zeroRobotButton"):
             self.ui.zeroRobotButton.enabled = model_is_built
-            self.ui.zeroRobotButton.toolTip = _("Sets all robot joint angles to zero.") if model_is_built else _("Run 'Start robot pose estimation' first to build the model.")
+            self.ui.zeroRobotButton.toolTip = _("Sets all robot joint angles to zero in the simulation only.") if model_is_built else _("Run 'Start robot pose estimation' first to build the model.")
         
         trajectory_is_planned = self.trajectoryPath is not None
         if hasattr(self.ui, "trajectorySlider"):
@@ -215,11 +218,11 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "playPauseButton"):
             self.ui.playPauseButton.enabled = trajectory_is_planned
         if hasattr(self.ui, "trajectoryStatusLabel"):
-            self.ui.trajectoryStatusLabel.text = "Trajectory ready" if trajectory_is_planned else "(No trajectory planned)"
+             if not self._isExecuting and self.trajectoryPath is None:
+                self.ui.trajectoryStatusLabel.text = "(No trajectory planned)"
 
-        # New checks for robot control buttons
         is_connected = self.logic and self.logic.is_robot_connected()
-        is_executing = self.robotExecutionThread and self.robotExecutionThread.is_alive()
+        is_executing = self._isExecuting
 
         if hasattr(self.ui, "connectButton"):
             self.ui.connectButton.enabled = not is_executing
@@ -229,18 +232,36 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.executeTrajectoryButton.enabled = is_connected and (self.trajectoryKeyframes is not None) and not is_executing
         if hasattr(self.ui, "stopTrajectoryButton"):
             self.ui.stopTrajectoryButton.enabled = is_executing
+        if hasattr(self.ui, "returnToZeroButton"):
+            self.ui.returnToZeroButton.enabled = is_connected and not is_executing
+        if hasattr(self.ui, "moveToPoseButton"):
+            self.ui.moveToPoseButton.enabled = is_connected and not is_executing and (self.lastEstimatedPoseSteps is not None)
 
     def onApplyButton(self) -> None:
         if not self._parameterNode:
             slicer.util.errorDisplay("Parameter node is not initialized.")
             return
         
+        # Reset previous pose when running a new estimation
+        self.lastEstimatedPoseSteps = None
+        self.ui.moveToPoseButton.enabled = False
+        self.ui.poseStatusLabel.text = "Estimating..."
+        slicer.app.processEvents()
+
         models_visible = self.ui.drawModelsCheckBox.isChecked() if hasattr(self.ui, "drawModelsCheckBox") else True
         markers_visible = self.ui.drawFiducialsCheckBox.isChecked() if hasattr(self.ui, "drawFiducialsCheckBox") else True
         
-        self.logic.process(self._parameterNode, models_visible=models_visible, markers_visible=markers_visible)
+        # The process function now returns the calculated steps
+        estimated_steps = self.logic.process(self._parameterNode, models_visible=models_visible, markers_visible=markers_visible)
+        
+        if estimated_steps is not None:
+            self.lastEstimatedPoseSteps = estimated_steps
+            self.ui.poseStatusLabel.text = f"Estimated Pose Steps: {estimated_steps.tolist()}"
+        else:
+            self.ui.poseStatusLabel.text = "Estimation failed. See logs for details."
+
         self._checkAllButtons()
-    
+
     def onPlanHeuristicPathButton(self) -> None:
         if not self._parameterNode:
             slicer.util.errorDisplay("Parameter node is not initialized.")
@@ -322,7 +343,10 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         slicer.util.infoDisplay(f"Baseplate transform saved successfully to node: '{self.logic.SAVED_BASEPLATE_TRANSFORM_NODE_NAME}'.")
 
     def onDrawFiducialsCheckBoxToggled(self, checked: bool) -> None:
-        self.logic._toggle_robot_markers(checked)
+        self.logic._toggle_mri_fiducials(checked)
+
+    def onDrawDebugMarkersCheckBoxToggled(self, checked: bool):
+        self.logic._toggle_debug_markers(checked)
 
     def onDrawModelsCheckBoxToggled(self, checked: bool) -> None:
         self.logic._toggle_robot_models(checked)
@@ -330,8 +354,31 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onZeroRobotButton(self) -> None:
         if self.logic:
             self.logic.zeroRobot()
+    
+    def onMoveToPoseButton(self):
+        if self._isExecuting:
+            slicer.util.warningDisplay("An action is already being executed.")
+            return
+        if self.lastEstimatedPoseSteps is None:
+            slicer.util.errorDisplay("No pose has been estimated yet.")
+            return
 
-    # --- New handler methods for robot control ---
+        self._isExecuting = True
+        self._checkAllButtons()
+        try:
+            self.logic.move_to_specific_pose(
+                target_pose_steps=self.lastEstimatedPoseSteps,
+                status_label=self.ui.trajectoryStatusLabel
+            )
+        except Exception as e:
+            slicer.util.errorDisplay(f"An unexpected error occurred during movement: {e}")
+            logging.error(f"An unexpected error occurred during movement: {e}", exc_info=True)
+        finally:
+            self._isExecuting = False
+            self.logic.stop_execution_flag = False
+            self._checkAllButtons()
+            if hasattr(self.ui, "trajectoryStatusLabel"):
+                self.ui.trajectoryStatusLabel.text = "Movement to pose finished."
 
     def onRefreshPortsButton(self):
         if hasattr(self.ui, "serialPortComboBox"):
@@ -361,7 +408,7 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._checkAllButtons()
         
     def onExecuteTrajectoryButton(self):
-        if self.robotExecutionThread and self.robotExecutionThread.is_alive():
+        if self._isExecuting:
             slicer.util.warningDisplay("A trajectory is already being executed.")
             return
 
@@ -369,28 +416,51 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay("Please plan a path first.")
             return
 
-        self.robotExecutionThread = threading.Thread(
-            target=self.logic.execute_trajectory_on_robot,
-            args=(self.trajectoryKeyframes, self.updateTrajectoryProgress)
-        )
-        self.robotExecutionThread.start()
+        self._isExecuting = True
+        self._checkAllButtons()  # Update button states (e.g., disable Execute, enable Stop)
+
+        try:
+            # Directly call the blocking logic function, passing the UI label for status updates
+            self.logic.execute_trajectory_on_robot(
+                self.trajectoryKeyframes,
+                self.ui.trajectoryStatusLabel
+            )
+        except Exception as e:
+            slicer.util.errorDisplay(f"An unexpected error occurred during execution: {e}")
+            logging.error(f"An unexpected error occurred during execution: {e}", exc_info=True)
+        finally:
+            # Ensure UI state is reset regardless of how execution finished
+            self._isExecuting = False
+            self.logic.stop_execution_flag = False  # Reset the stop flag
+            self._checkAllButtons()  # Revert button states
+            if hasattr(self.ui, "trajectoryStatusLabel"):
+                self.ui.trajectoryStatusLabel.text = "Execution Finished"
+            
+    def onReturnToZeroButton(self):
+        if self._isExecuting:
+            slicer.util.warningDisplay("A trajectory is already being executed.")
+            return
+
+        self._isExecuting = True
         self._checkAllButtons()
+
+        try:
+            # Call the new logic function
+            self.logic.return_to_zero_position(
+                status_label=self.ui.trajectoryStatusLabel
+            )
+        except Exception as e:
+            slicer.util.errorDisplay(f"An unexpected error occurred during homing: {e}")
+            logging.error(f"An unexpected error occurred during homing: {e}", exc_info=True)
+        finally:
+            self._isExecuting = False
+            self.logic.stop_execution_flag = False
+            self._checkAllButtons()
+            if hasattr(self.ui, "trajectoryStatusLabel"):
+                self.ui.trajectoryStatusLabel.text = "Homing Finished"
 
     def onStopTrajectoryButton(self):
         self.logic.stop_trajectory_execution()
-
-    def updateTrajectoryProgress(self, statusMessage, stepIndex):
-        """A thread-safe callback to update the GUI from the execution thread."""
-        qt.QTimer.singleShot(0, lambda: self._safeUpdateGui(statusMessage, stepIndex))
-
-    def _safeUpdateGui(self, statusMessage, stepIndex):
-        """This method runs in the main thread and can safely modify UI elements."""
-        if hasattr(self.ui, "trajectoryStatusLabel"):
-            self.ui.trajectoryStatusLabel.text = statusMessage
-        
-        # Re-enable buttons if execution is finished
-        if (self.robotExecutionThread and not self.robotExecutionThread.is_alive()):
-            self._checkAllButtons()
 
 
 #
@@ -412,6 +482,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
         self.models_visible = True
         self.markers_visible = True
+        self.debug_markers_visible = False
 
         self.robot_definition = self._define_robot_structure()
         self.robot_definition_dict = {joint["name"]: joint for joint in self.robot_definition}
@@ -455,7 +526,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
     def planHeuristicPath(self, pNode: 'MamriParameterNode', total_steps=100) -> Optional[Tuple[List[np.ndarray], List[np.ndarray]]]:
         """
-        Generates a collision-avoidance path.
+        Generates a collision-avoidance path and logs detailed diagnostic information about each keyframe.
         Returns the dense path for visualization and the keyframes for robot control.
         """
         logging.info("Planning heuristic 'up, over, down' path...")
@@ -489,54 +560,44 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             if is_last_segment:
                 path.append(end_wp)
 
-        body_poly = self._get_body_polydata(pNode.segmentationNode)
+        # Find segmentation node by name
+        segmentationNode = slicer.mrmlScene.GetFirstNodeByName("AutoBodySegmentation")
+        body_poly = self._get_body_polydata(segmentationNode) if segmentationNode else None
+
         base_tf = vtk.vtkMatrix4x4()
         if base_node := self.jointTransformNodes.get("Baseplate"):
             base_node.GetMatrixTransformToWorld(base_tf)
         
-        for config in path:
-            if self._check_collision(dict(zip(self.articulated_chain, config)), base_tf, body_poly):
-                logging.warning("Heuristic path resulted in a collision. The path may be unsafe.")
-                slicer.util.warningDisplay("Warning: The generated path results in a collision. Manual adjustment may be needed.")
-                break
+        if body_poly:
+            for config in path:
+                if self._check_collision(dict(zip(self.articulated_chain, config)), base_tf, body_poly):
+                    logging.warning("Heuristic path resulted in a collision. The path may be unsafe.")
+                    slicer.util.warningDisplay("Warning: The generated path results in a collision. Manual adjustment may be needed.")
+                    break
+        else:
+            logging.warning("Could not find 'AutoBodySegmentation' for collision checking the path.")
 
-        if path:
-            self.log_keyframe_commands(keyframes)
+        if keyframes:
+            try:
+                log_messages = ["\n" + "="*50, "PLANNED TRAJECTORY KEYFRAME DIAGNOSTICS".center(50), "="*50]
+                
+                for i, pose_rad in enumerate(keyframes):
+                    pose_deg = np.round(np.degrees(pose_rad), 2)
+                    pose_steps = self._convert_angles_to_steps_array(pose_rad)
+                    
+                    waypoint_name = "Start" if i == 0 else f"Waypoint {i}"
+                    log_messages.append(f"\n--- {waypoint_name} Pose ---")
+                    log_messages.append(f"  Target Angles (Deg): {pose_deg.tolist()}")
+                    log_messages.append(f"  Target Steps:        {pose_steps.tolist()}")
+
+                log_messages.append("\n" + "="*50 + "\n")
+                logging.info("\n".join(log_messages))
+                slicer.util.infoDisplay("A detailed keyframe plan has been printed to the Python Console.")
+            except Exception as e:
+                logging.error(f"Could not generate keyframe diagnostic plan: {e}")
         
         return path, keyframes
-
-    def log_keyframe_commands(self, keyframes: List[np.ndarray]):
-        """Logs the high-level sequence of moves between keyframes."""
-        logging.info("="*35)
-        logging.info("   Robot Trajectory Keyframe Plan  ")
-        logging.info("="*35)
-        
-        try:
-            previous_steps = self._convert_angles_to_steps_array(keyframes[0])
-            logging.info(f"Start Pose (steps): {previous_steps}")
-
-            for i, pose_rad in enumerate(keyframes[1:]):
-                logging.info(f"\n--- Segment {i+1} ---")
-                target_steps = self._convert_angles_to_steps_array(pose_rad)
-                moving_joint_indices = np.where(previous_steps != target_steps)[0]
-
-                if len(moving_joint_indices) == 0:
-                    logging.info("  No movement in this segment.")
-                    continue
-
-                for joint_index in moving_joint_indices:
-                    joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
-                    command_letter = joint_def["command_letter"]
-                    target_step = target_steps[joint_index]
-                    logging.info(f"  COMMAND: Move Joint {command_letter} to {target_step} steps")
-                
-                previous_steps = target_steps
-            
-            logging.info("\n" + "="*35)
-            slicer.util.infoDisplay("A high-level plan based on keyframes has been printed to the Python Console.")
-        except Exception as e:
-            logging.error(f"Could not generate keyframe command plan: {e}")
-
+    
     def get_current_positions(self) -> Optional[List[int]]:
         """Sends 'P' to the robot and returns the current positions of all joints."""
         if not self.is_robot_connected():
@@ -553,85 +614,132 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             logging.warning(f"Could not get robot position. Error: {e}")
             return None
 
-    def execute_trajectory_on_robot(self, keyframes: List[np.ndarray], status_callback=None):
+    def execute_trajectory_on_robot(self, keyframes: List[np.ndarray], status_label: qt.QLabel = None):
         """
-        Executes a trajectory by moving to each keyframe sequentially.
-        For each joint, it repeatedly sends the target command to trigger
-        step-by-step movement, polling position until arrival.
+        Executes a trajectory by moving the robot to each keyframe pose sequentially.
+        This function is BLOCKING and treats each keyframe as a goal pose.
         """
         if not self.is_robot_connected():
-            if status_callback: status_callback("Execution failed: Robot not connected.", 0)
+            error_msg = "Execution failed: Robot not connected."
+            if status_label: status_label.text = error_msg
+            logging.error(error_msg)
             return
 
         self.stop_execution_flag = False
+
+        def update_gui(message: str):
+            if status_label:
+                status_label.text = message
+            slicer.app.processEvents()
+
+        # 1. Synchronize with the robot's actual starting position
+        update_gui("Reading initial robot position...")
+        initial_robot_positions = self.get_current_positions()
+        if initial_robot_positions is None:
+            update_gui("FATAL: Could not read robot's initial position. Aborting.")
+            logging.error("Aborting execution: Failed to get initial robot position.")
+            return
         
-        keyframe_steps = [self._convert_angles_to_steps_array(pose) for pose in keyframes]
-        current_steps_array = np.copy(keyframe_steps[0])
+        num_joints = len(self.articulated_chain)
+        actual_start_steps = np.array(initial_robot_positions[:num_joints])
 
-        for i in range(len(keyframe_steps) - 1):
-            start_steps = keyframe_steps[i]
-            target_steps = keyframe_steps[i+1]
+        # 2. Define the full execution path, including the actual start
+        planned_steps = [self._convert_angles_to_steps_array(pose) for pose in keyframes]
+        full_path_steps = [actual_start_steps] + planned_steps
+        
+        unique_path_steps = []
+        for step_array in full_path_steps:
+            if not unique_path_steps or not np.array_equal(unique_path_steps[-1], step_array):
+                unique_path_steps.append(step_array)
+
+        # --- NEW: DETAILED DIAGNOSTIC LOGGING ---
+        try:
+            log_messages = ["\n" + "="*51, "ROBOT TRAJECTORY DIAGNOSTICS".center(51), "="*51]
             
-            moving_joint_indices = np.where(start_steps != target_steps)[0]
-            if not moving_joint_indices.any():
-                continue
+            # Log Initial State
+            initial_angles_rad = self._convert_steps_array_to_angles(actual_start_steps)
+            initial_angles_deg = np.round(np.degrees(initial_angles_rad), 2)
+            log_messages.append("\n--- Initial State ---")
+            log_messages.append(f"Actual Start (Steps): {actual_start_steps.tolist()}")
+            log_messages.append(f"Actual Start (Deg):   {initial_angles_deg.tolist()}")
 
-            for joint_index in moving_joint_indices:
+            # Log Waypoints
+            log_messages.append("\n--- Trajectory Waypoints ---")
+            # We skip unique_path_steps[0] as it's the actual start state, not a planned waypoint
+            for i, waypoint_steps in enumerate(unique_path_steps[1:]):
+                waypoint_rads = self._convert_steps_array_to_angles(waypoint_steps)
+                waypoint_degs = np.round(np.degrees(waypoint_rads), 2)
+                log_messages.append(f"Waypoint {i} (Target):")
+                log_messages.append(f"  - Steps: {waypoint_steps.tolist()}")
+                log_messages.append(f"  - Degs:  {waypoint_degs.tolist()}")
+            
+            log_messages.append("\n" + "="*51 + "\n")
+            logging.info("\n".join(log_messages))
+        except Exception as e:
+            logging.error(f"Failed to generate diagnostic log: {e}")
+        # --- END OF NEW LOGGING CODE ---
+
+        if len(unique_path_steps) < 2:
+            update_gui("Robot is already at the target position.")
+            return
+
+        # 3. Execute the synchronized path
+        current_pose_steps = np.copy(actual_start_steps)
+        for i, target_pose_steps in enumerate(unique_path_steps[1:]):
+            if self.stop_execution_flag:
+                update_gui("Execution stopped by user.")
+                return
+
+            logging.info(f"\n--- Moving to Keyframe {i+1}/{len(unique_path_steps)-1} ---")
+            logging.info(f"  Target Pose: {target_pose_steps.tolist()}")
+
+            timeout = 120.0
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
                 if self.stop_execution_flag:
-                    if status_callback: status_callback("Execution stopped by user.", i)
+                    update_gui("Execution stopped by user.")
                     return
                 
-                joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
-                command_letter = joint_def["command_letter"]
-                target_step = target_steps[joint_index]
-                command = f"{command_letter}{target_step}"
+                live_positions = self.get_current_positions()
+                if live_positions is None:
+                    time.sleep(0.2)
+                    continue
                 
-                timeout = 60.0  # Increased timeout per joint
-                start_time = time.time()
-                arrived = False
+                live_pose_steps = np.array(live_positions[:num_joints])
+                current_pose_steps = live_pose_steps
+
+                pose_is_achieved = np.all(np.abs(live_pose_steps - target_pose_steps) <= 2)
+                if pose_is_achieved:
+                    logging.info(f"Keyframe {i+1} reached.")
+                    break
+
+                status_messages = []
+                for joint_index in range(num_joints):
+                    if abs(live_pose_steps[joint_index] - target_pose_steps[joint_index]) > 2:
+                        joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
+                        command_letter = joint_def["command_letter"]
+                        command = f"{command_letter}{target_pose_steps[joint_index]}"
+                        self.send_command_to_robot(command)
+                        status_messages.append(f"{command_letter}: {live_pose_steps[joint_index]}->{target_pose_steps[joint_index]}")
+
+                update_gui("Moving... " + ", ".join(status_messages))
                 
-                while time.time() - start_time < timeout:
-                    if self.stop_execution_flag:
-                        if status_callback: status_callback("Execution stopped by user.", i)
-                        return
-                    
-                    # First, get the current position
-                    current_positions = self.get_current_positions()
-                    current_step = None
+                live_pose_rad = self._convert_steps_array_to_angles(live_pose_steps)
+                self.setRobotPose(live_pose_rad)
+                
+                time.sleep(0.1)
 
-                    if current_positions and len(current_positions) > joint_index:
-                        current_step = current_positions[joint_index]
-                        if status_callback:
-                            status_callback(f"Moving {command_letter}: {current_step} -> {target_step}", i)
-                        
-                        # Check if the joint has arrived at its destination
-                        if abs(current_step - target_step) <= 2: # Arrival tolerance of 2 steps
-                            arrived = True
-                            logging.info(f"Joint {command_letter} has arrived at position {current_step}.")
-                            
-                            # Update the master state of the robot
-                            current_steps_array[joint_index] = current_step
-                            new_pose_rad = self._convert_steps_array_to_angles(current_steps_array)
-                            
-                            # Schedule the model update on the main thread to be thread-safe
-                            qt.QTimer.singleShot(0, lambda pose=new_pose_rad: self.setRobotPose(pose))
-                            break # Exit the while loop for this joint
+            else:
+                error_msg = f"TIMEOUT: Robot failed to reach keyframe {i+1}."
+                logging.error(error_msg)
+                update_gui(error_msg)
+                return
 
-                    # If not arrived, send the command AGAIN to trigger the next single step
-                    self.send_command_to_robot(command)
-                    
-                    # A small delay to allow for mechanical movement and prevent serial flooding
-                    time.sleep(0.1)
-
-                if not arrived:
-                    error_msg = f"TIMEOUT: Joint {command_letter} did not reach target."
-                    logging.error(error_msg)
-                    if status_callback: status_callback(error_msg, i)
-                    return # Stop the entire execution on timeout
-        
-        final_pose_rad = self._convert_steps_array_to_angles(current_steps_array)
-        qt.QTimer.singleShot(0, lambda pose=final_pose_rad: self.setRobotPose(pose))
-        if status_callback: status_callback("Trajectory execution complete.", len(keyframes))
+        final_pose_rad = self._convert_steps_array_to_angles(unique_path_steps[-1])
+        self.setRobotPose(final_pose_rad)
+        update_gui("Trajectory execution complete.")
+        logging.info("Trajectory execution complete.")
 
     def _convert_angles_to_steps_array(self, joint_angles_rad: np.ndarray) -> np.ndarray:
         """Converts an array of joint angles (radians) into an array of motor steps."""
@@ -742,12 +850,12 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         base_path = r"C:\Users\paul\Documents\UTwente\MSc ROB\MSc Thesis\CAD\Joints"
         return [
             {"name": "Baseplate", "stl_path": os.path.join(base_path, "Baseplate.STL"), "collision_stl_path": os.path.join(base_path, "Baseplate_collision.STL"), "parent": None, "fixed_offset_to_parent": None, "has_markers": True, "local_marker_coords": [(-10.0, 20.0, 5.0), (10.0, 20.0, 5.0), (-10.0, -20.0, 5.0)], "arm_lengths": (40.0, 20.0), "color": (1, 0, 0), "articulation_axis": None},
-            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder1_collision.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "A", "steps_per_rev": 1716},
-            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "collision_stl_path": os.path.join(base_path, "Link1_collision.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "B", "steps_per_rev": 2652},
-            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder2_collision.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "C", "steps_per_rev": 1612},
-            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "collision_stl_path": os.path.join(base_path, "Elbow1_collision.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)), "has_markers": True, "local_marker_coords": [(-10, 35.0, 85), (10, 35.0, 85), (-10, -35.0, 85)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "D", "steps_per_rev": 1716},
-            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "collision_stl_path": os.path.join(base_path, "Wrist_collision.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "E", "steps_per_rev": 1300},
-            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "collision_stl_path": os.path.join(base_path, "End_collision.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 8)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 26), (10, 22.5, 26), (-10, -22.5, 26)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-270, 270), "command_letter": "F", "steps_per_rev": 1300},
+            {"name": "Shoulder1", "stl_path": os.path.join(base_path, "Shoulder1.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder1_collision.STL"), "parent": "Baseplate", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 20.0)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "A", "steps_per_rev": 3332},
+            {"name": "Link1", "stl_path": os.path.join(base_path, "Link1.STL"), "collision_stl_path": os.path.join(base_path, "Link1_collision.STL"), "parent": "Shoulder1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 30)), "has_markers": True, "local_marker_coords": [(12.5, 45.0, 110.0), (-12.5, 45.0, 110.0), (12.5, 45.0, 40.0)], "arm_lengths": (70.0, 25.0), "color": (0, 1, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "B", "steps_per_rev": 3332},
+            {"name": "Shoulder2", "stl_path": os.path.join(base_path, "Shoulder2.STL"), "collision_stl_path": os.path.join(base_path, "Shoulder2_collision.STL"), "parent": "Link1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "C", "steps_per_rev": 3332},
+            {"name": "Elbow1", "stl_path": os.path.join(base_path, "Elbow1.STL"), "collision_stl_path": os.path.join(base_path, "Elbow1_collision.STL"), "parent": "Shoulder2", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 0)), "has_markers": True, "local_marker_coords": [(-10, 35.0, 85), (10, 35.0, 85), (-10, -35.0, 85)], "arm_lengths": (70.0, 20.0),  "color": (0, 1, 0), "articulation_axis": "IS", "joint_limits": (-180, 180), "command_letter": "D", "steps_per_rev": 3332},
+            {"name": "Wrist", "stl_path": os.path.join(base_path, "Wrist.STL"), "collision_stl_path": os.path.join(base_path, "Wrist_collision.STL"), "parent": "Elbow1", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 150)), "has_markers": False, "color": (0, 0.5, 0), "articulation_axis": "PA", "joint_limits": (-120, 120), "command_letter": "E", "steps_per_rev": 3332},
+            {"name": "End", "stl_path": os.path.join(base_path, "End.STL"), "collision_stl_path": os.path.join(base_path, "End_collision.STL"), "parent": "Wrist", "fixed_offset_to_parent": self._create_offset_matrix((0, 0, 8)), "has_markers": True, "local_marker_coords": [(-10, 22.5, 26), (10, 22.5, 26), (-10, -22.5, 26)], "arm_lengths": (45.0, 20.0), "color": (1, 0, 0), "articulation_axis": "IS", "joint_limits": (-270, 270), "command_letter": "F", "steps_per_rev": 3332},
             {"name": "Needle", "stl_path": os.path.join(base_path, "Needle.STL"), "collision_stl_path": os.path.join(base_path, "Needle_collision.STL"), "parent": "End", "fixed_offset_to_parent": self._create_offset_matrix((-50, 0, 71)), "has_markers": False, "color": (1, 0, 0), "articulation_axis": "TRANS_X", "joint_limits": (0, 0), "needle_tip_local": (0, 0, 0), "needle_axis_local": (1, 0, 0)}
         ]
         
@@ -820,10 +928,40 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return False
         
     def stop_trajectory_execution(self):
-        """Signals the trajectory execution loop to stop."""
-        logging.info("Stop signal received for trajectory execution.")
+        """
+        Signals the trajectory execution loop to stop and sends the robot's
+        current position as its new setpoint to perform a controlled stop.
+        """
+        logging.info("STOP command received. Halting robot motion...")
+        
+        # 1. Set the flag to stop any Python-side execution loops.
         self.stop_execution_flag = True
 
+        # 2. Check for an active connection.
+        if not self.is_robot_connected():
+            logging.warning("Cannot send stop command: Robot not connected.")
+            return
+
+        # 3. Get the robot's current position.
+        current_positions = self.get_current_positions()
+        if current_positions is None:
+            logging.error("Failed to get current position to send stop command. Motor may not stop.")
+            return
+
+        # 4. Send the current position of each joint back as its new target.
+        logging.info(f"Sending current positions {current_positions} as new setpoints to halt motion.")
+        for i, pos in enumerate(current_positions):
+            if i < len(self.articulated_chain):
+                joint_name = self.articulated_chain[i]
+                joint_def = self.robot_definition_dict.get(joint_name, {})
+                command_letter = joint_def.get("command_letter")
+                
+                if command_letter:
+                    command = f"{command_letter}{pos}"
+                    self.send_command_to_robot(command)
+        
+        logging.info("Halt commands sent.")
+        
     def getParameterNode(self) -> 'MamriParameterNode':
         return MamriParameterNode(super().getParameterNode())
 
@@ -831,7 +969,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         while node := slicer.mrmlScene.GetFirstNodeByName(name):
             slicer.mrmlScene.RemoveNode(node)
 
-    def process(self, parameterNode: 'MamriParameterNode', models_visible: bool, markers_visible: bool) -> None:
+    def process(self, parameterNode: 'MamriParameterNode', models_visible: bool, markers_visible: bool) -> Optional[np.ndarray]:
         self.models_visible = models_visible
         self.markers_visible = markers_visible
         
@@ -864,19 +1002,26 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             
             apply_correction = parameterNode.applyEndEffectorCorrection
 
+            final_pose_angles = None
             if baseplate_transform_found and "End" in identified_joints_data:
                 end_fiducials_node = slicer.mrmlScene.GetFirstNodeByName("EndFiducials")
                 if end_fiducials_node and end_fiducials_node.GetNumberOfControlPoints() == 3:
-                    self._solve_full_chain_ik(end_fiducials_node, apply_correction)
-                    self._visualize_all_joint_markers_from_fk()
-                # The original code called _solve_all_ik_chains here, but that method relies on a
-                # self.ik_chains_config that isn't defined. We will rely on the full-chain IK.
+                    # _solve_full_chain_ik now returns the angles
+                    final_pose_angles = self._solve_full_chain_ik(end_fiducials_node, apply_correction)
+                    if final_pose_angles is not None:
+                        self.setRobotPose(final_pose_angles)
+                        self._visualize_all_joint_markers_from_fk()
             else:
-                logging.info("Prerequisites for full-chain IK not met. Using standard sequential IK for any detected intermediate joints.")
-                # Same issue here with _solve_all_ik_chains. It is not fully implemented.
-                pass
-            logging.info("Mamri processing finished.")
+                logging.info("Prerequisites for full-chain IK not met. Cannot estimate pose.")
 
+            logging.info("Mamri processing finished.")
+            
+            # If a pose was successfully calculated, convert to steps and return it
+            if final_pose_angles is not None:
+                return self._convert_angles_to_steps_array(final_pose_angles)
+            
+            return None
+        
     def _get_body_polydata(self, segmentationNode: vtkMRMLSegmentationNode) -> Optional[vtk.vtkPolyData]:
         if not segmentationNode:
             return None
@@ -900,10 +1045,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
 
     def findAndSetEntryPoint(self, pNode: 'MamriParameterNode') -> None:
         targetNode = pNode.targetFiducialNode
-        segmentationNode = pNode.segmentationNode
+        # Find the segmentation node by name instead of using the parameter node
+        segmentationNode = slicer.mrmlScene.GetFirstNodeByName("AutoBodySegmentation")
+        
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and segmentationNode):
-            slicer.util.errorDisplay("Please select a body segmentation and place a target marker first.")
+            slicer.util.errorDisplay("Please place a target marker and ensure 'AutoBodySegmentation' exists (run pose estimation).")
             return
+            
         body_poly = self._get_body_polydata(segmentationNode)
         if not body_poly:
             return
@@ -990,25 +1138,33 @@ class MamriLogic(ScriptedLoadableModuleLogic):
     def planTrajectory(self, pNode: 'MamriParameterNode', solve_only=False) -> Optional[np.ndarray]:
         if not solve_only:
             logging.info("Starting trajectory goal calculation...")
-        targetNode, entryNode, segmentationNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode, pNode.segmentationNode
+        
+        targetNode, entryNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode
+        # Find the segmentation node by name
+        segmentationNode = slicer.mrmlScene.GetFirstNodeByName("AutoBodySegmentation")
+
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and entryNode and entryNode.GetNumberOfControlPoints() > 0 and segmentationNode):
-            if not solve_only: slicer.util.errorDisplay("Set target, entry, and segmentation to plan trajectory.")
+            if not solve_only: slicer.util.errorDisplay("Set target, entry markers, and ensure 'AutoBodySegmentation' exists to plan trajectory.")
             return None
+            
         body_polydata = self._get_body_polydata(segmentationNode)
         if not body_polydata:
-            if not solve_only: slicer.util.errorDisplay("Could not get body polydata from segmentation. Aborting.")
+            if not solve_only: slicer.util.errorDisplay("Could not get body polydata from 'AutoBodySegmentation'. Aborting.")
             return None
+            
         target_pos, entry_pos = np.array(targetNode.GetNthControlPointPositionWorld(0)), np.array(entryNode.GetNthControlPointPositionWorld(0))
         direction_vec = target_pos - entry_pos
         if np.linalg.norm(direction_vec) < 1e-6:
             if not solve_only: slicer.util.errorDisplay("Entry and Target markers are at the same position.")
             return None
+            
         x_axis = direction_vec / np.linalg.norm(direction_vec)
         needle_tip_pos = entry_pos - (pNode.safetyDistance * x_axis)
         if not solve_only:
             line_node = self._visualize_trajectory_line(target_pos, needle_tip_pos)
             if line_node:
                 self._organize_node_in_subject_hierarchy(line_node, self.MASTER_FOLDER_NAME, "Trajectory Plan")
+                
         up_vec = np.array([0, 0, 1.0]); 
         if abs(np.dot(x_axis, up_vec)) > 0.99: up_vec = np.array([0, 1.0, 0])
         y_axis = np.cross(up_vec, x_axis); y_axis /= np.linalg.norm(y_axis)
@@ -1022,6 +1178,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if not base_node:
             if not solve_only: slicer.util.errorDisplay("Robot model not loaded or baseplate is missing.")
             return None
+            
         base_transform_vtk = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(base_transform_vtk)
         current_angles_rad = np.array(self._get_current_joint_angles(self.articulated_chain))
         initial_guesses = [current_angles_rad, [0.0] * len(self.articulated_chain)]
@@ -1038,11 +1195,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                     best_result = result
             except Exception as e: 
                 logging.warning(f"IK optimization failed for one guess: {e}")
+                
         if not best_result: 
             if not solve_only: slicer.util.errorDisplay("Could not find a valid, collision-free trajectory solution.")
             return None
+            
         return np.array(best_result.x)
-        
+       
     def _load_collision_models(self):
         logging.info("Loading robot collision models...")
         self.jointCollisionPolys.clear()
@@ -1151,13 +1310,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 elbow_errors = [1e4] * len(elbow_local_coords) * 3
         return end_errors + elbow_errors
 
-    def _solve_full_chain_ik(self, end_effector_target_node: vtkMRMLMarkupsFiducialNode, apply_correction: bool):
+    def _solve_full_chain_ik(self, end_effector_target_node: vtkMRMLMarkupsFiducialNode, apply_correction: bool) -> Optional[np.ndarray]:
         chain_defs = [self.robot_definition_dict[name] for name in self.articulated_chain]
         end_def = self.robot_definition_dict["End"]
         end_target_mri = [end_effector_target_node.GetNthControlPointPositionWorld(i) for i in range(3)]
         base_node = self.jointTransformNodes.get("Baseplate")
         if not base_node:
-            logging.error("Full-chain IK requires the Baseplate transform node."); return
+            logging.error("Full-chain IK requires the Baseplate transform node."); return None
         tf_base_to_world = vtk.vtkMatrix4x4(); base_node.GetMatrixTransformToWorld(tf_base_to_world)
         elbow_target_mri, elbow_def = None, None
         elbow_fiducials_node = slicer.mrmlScene.GetFirstNodeByName("Elbow1Fiducials")
@@ -1179,10 +1338,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             except Exception as e:
                 logging.error(f"Scipy optimization for attempt #{i+1} failed: {e}")
         if not best_result:
-            logging.error("Full-chain IK failed to converge for all initial guesses."); return
+            logging.error("Full-chain IK failed to converge for all initial guesses.")
+            return None # Return None on failure
+            
         final_angles_rad = best_result.x
         self._log_ik_solution_details(final_angles_rad, self.articulated_chain, tf_base_to_world, end_def, end_target_mri, apply_correction, elbow_def, elbow_target_mri)
-        self.setRobotPose(final_angles_rad)
+        
+        return final_angles_rad # Return the final angles on success
     
     def saveBaseplateTransform(self, current_baseplate_transform_node: vtkMRMLLinearTransformNode):
         self._clear_node_by_name(self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME)
@@ -1210,7 +1372,8 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         debug_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", debug_node_name)
         self._organize_node_in_subject_hierarchy(debug_node, self.MASTER_FOLDER_NAME, "Debug Markers")
         if disp := debug_node.GetDisplayNode():
-            disp.SetVisibility(self.markers_visible)
+            # Use the new, separate visibility flag
+            disp.SetVisibility(self.debug_markers_visible)
             disp.SetGlyphScale(3.0); disp.SetTextScale(3.5); r,g,b = joint_def.get("color", (0.1,0.8,0.8))
             disp.SetSelectedColor(r*0.7, g*0.7, b*0.7); disp.SetColor(r,g,b); disp.SetOpacity(1)
         prefix = "".join(w[0] for w in joint_name.split() if w)[:3].upper()
@@ -1389,18 +1552,168 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             for part_name in all_parts:
                 self._clear_node_by_name(f"DEBUG_COLLISION_{part_name}")
         logging.info("Cleanup complete.")
+    
+    def return_to_zero_position(self, status_label: qt.QLabel = None):
+        """
+        Commands the robot to move to the home position (all joints at 0 steps).
+        This function is BLOCKING.
+        """
+        if not self.is_robot_connected():
+            error_msg = "Execution failed: Robot not connected."
+            if status_label: status_label.text = error_msg
+            logging.error(error_msg)
+            return
 
-    def _toggle_robot_markers(self, checked: bool):
+        self.stop_execution_flag = False
+
+        def update_gui(message: str):
+            if status_label:
+                status_label.text = message
+            slicer.app.processEvents()
+
+        num_joints = len(self.articulated_chain)
+        target_pose_steps = np.zeros(num_joints, dtype=int)
+        
+        logging.info("\n--- Commanding Robot to Return to Zero Position ---")
+
+        timeout = 120.0  # Generous timeout for the entire homing sequence
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            if self.stop_execution_flag:
+                update_gui("Homing stopped by user.")
+                return
+            
+            live_positions = self.get_current_positions()
+            if live_positions is None:
+                time.sleep(0.2)
+                continue
+            
+            live_pose_steps = np.array(live_positions[:num_joints])
+
+            # Check if all joints are at the zero position
+            if np.all(np.abs(live_pose_steps - target_pose_steps) <= 2):
+                logging.info("Robot has reached the zero position.")
+                break
+
+            status_messages = []
+            for joint_index in range(num_joints):
+                if abs(live_pose_steps[joint_index] - target_pose_steps[joint_index]) > 2:
+                    joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
+                    command_letter = joint_def["command_letter"]
+                    command = f"{command_letter}{target_pose_steps[joint_index]}"
+                    self.send_command_to_robot(command)
+                    status_messages.append(f"{command_letter}: {live_pose_steps[joint_index]}->0")
+
+            update_gui("Homing... " + ", ".join(status_messages))
+            
+            live_pose_rad = self._convert_steps_array_to_angles(live_pose_steps)
+            self.setRobotPose(live_pose_rad)
+            
+            time.sleep(0.1)
+
+        else: # This 'else' belongs to the while loop, executing on timeout
+            error_msg = "TIMEOUT: Robot failed to reach zero position."
+            logging.error(error_msg)
+            update_gui(error_msg)
+            return
+
+        # Final update to ensure the model is perfectly at zero
+        self.setRobotPose(np.zeros(num_joints))
+        update_gui("Robot is at zero position.")
+        logging.info("Return to zero command finished.")
+
+    def move_to_specific_pose(self, target_pose_steps: np.ndarray, status_label: qt.QLabel = None):
+        """
+        Commands the robot to move to a specific pose defined by step counts.
+        This function is BLOCKING.
+        """
+        if not self.is_robot_connected():
+            error_msg = "Execution failed: Robot not connected."
+            if status_label: status_label.text = error_msg
+            logging.error(error_msg)
+            return
+
+        self.stop_execution_flag = False
+
+        def update_gui(message: str):
+            if status_label:
+                status_label.text = message
+            slicer.app.processEvents()
+
+        num_joints = len(self.articulated_chain)
+        logging.info(f"\n--- Commanding Robot to Move to Pose: {target_pose_steps.tolist()} ---")
+
+        timeout = 120.0
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            if self.stop_execution_flag:
+                update_gui("Movement stopped by user.")
+                return
+            
+            live_positions = self.get_current_positions()
+            if live_positions is None:
+                time.sleep(0.2)
+                continue
+            
+            live_pose_steps = np.array(live_positions[:num_joints])
+
+            if np.all(np.abs(live_pose_steps - target_pose_steps) <= 2):
+                logging.info("Robot has reached the target pose.")
+                break
+
+            status_messages = []
+            for joint_index in range(num_joints):
+                if abs(live_pose_steps[joint_index] - target_pose_steps[joint_index]) > 2:
+                    joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
+                    command_letter = joint_def["command_letter"]
+                    command = f"{command_letter}{target_pose_steps[joint_index]}"
+                    self.send_command_to_robot(command)
+                    status_messages.append(f"{command_letter}: {live_pose_steps[joint_index]}->{target_pose_steps[joint_index]}")
+
+            update_gui("Moving to pose... " + ", ".join(status_messages))
+            
+            live_pose_rad = self._convert_steps_array_to_angles(live_pose_steps)
+            self.setRobotPose(live_pose_rad)
+            
+            time.sleep(0.1)
+
+        else:
+            error_msg = "TIMEOUT: Robot failed to reach target pose."
+            logging.error(error_msg)
+            update_gui(error_msg)
+            return
+
+        final_pose_rad = self._convert_steps_array_to_angles(target_pose_steps)
+        self.setRobotPose(final_pose_rad)
+        update_gui("Robot has arrived at the estimated pose.")
+        logging.info("Move to pose command finished.")
+
+    def _toggle_mri_fiducials(self, checked: bool):
+        """Toggles visibility of only the fiducials detected from the MRI scan."""
+        self.markers_visible = checked
         marker_names = set()
         for jc in self.robot_definition:
             if jc.get("has_markers"):
                 marker_names.add(f"{jc['name']}Fiducials")
+        for name in marker_names:
+            if node := slicer.mrmlScene.GetFirstNodeByName(name):
+                if disp := node.GetDisplayNode():
+                    disp.SetVisibility(checked)
+
+    def _toggle_debug_markers(self, checked: bool):
+        """Toggles visibility of only the local coordinate debug markers."""
+        self.debug_markers_visible = checked
+        marker_names = set()
+        for jc in self.robot_definition:
+            if jc.get("has_markers"):
                 marker_names.add(f"{jc['name']}_LocalMarkers_WorldView_DEBUG")
         for name in marker_names:
             if node := slicer.mrmlScene.GetFirstNodeByName(name):
                 if disp := node.GetDisplayNode():
                     disp.SetVisibility(checked)
-    
+
     def _toggle_robot_models(self, checked: bool):
         for model_node in self.jointModelNodes.values():
             if disp := model_node.GetDisplayNode(): disp.SetVisibility(checked)
