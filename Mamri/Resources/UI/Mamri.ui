@@ -130,7 +130,7 @@
                <property name="minimumSize">
                 <size>
                  <width>0</width>
-                 <height>210</height>
+                 <height>245</height>
                 </size>
                </property>
                <property name="verticalScrollBarPolicy">
@@ -412,7 +412,7 @@
                <property name="minimumSize">
                 <size>
                  <width>0</width>
-                 <height>210</height>
+                 <height>260</height>
                 </size>
                </property>
                <property name="verticalScrollBarPolicy">
@@ -647,7 +647,7 @@
                  <property name="minimumSize">
                   <size>
                    <width>0</width>
-                   <height>210</height>
+                   <height>245</height>
                   </size>
                  </property>
                  <property name="verticalScrollBarPolicy">
@@ -666,7 +666,7 @@
                  <property name="minimumSize">
                   <size>
                    <width>0</width>
-                   <height>210</height>
+                   <height>245</height>
                   </size>
                  </property>
                  <property name="verticalScrollBarPolicy">
@@ -686,50 +686,91 @@
             </property>
             <layout class="QVBoxLayout" name="verticalLayout_8">
              <item>
-              <layout class="QFormLayout" name="robotConnectionLayout_2">
-               <item row="0" column="0">
-                <widget class="QLabel" name="comPortLabel">
-                 <property name="text">
-                  <string>COM Port:</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="0" column="1">
-                <layout class="QHBoxLayout" name="comPortLayout">
-                 <item>
-                  <widget class="QComboBox" name="serialPortComboBox"/>
-                 </item>
-                 <item>
-                  <widget class="QPushButton" name="refreshPortsButton">
-                   <property name="text">
-                    <string>Refresh</string>
-                   </property>
-                  </widget>
-                 </item>
-                </layout>
-               </item>
-               <item row="1" column="1">
-                <layout class="QHBoxLayout" name="connectionLayout">
-                 <item>
-                  <widget class="QPushButton" name="connectButton">
-                   <property name="text">
-                    <string>Connect</string>
-                   </property>
-                   <property name="checkable">
-                    <bool>true</bool>
-                   </property>
-                  </widget>
-                 </item>
-                 <item>
-                  <widget class="QLabel" name="connectionStatusLabel">
-                   <property name="text">
-                    <string>Status: Not Connected</string>
-                   </property>
-                  </widget>
-                 </item>
-                </layout>
-               </item>
-              </layout>
+              <widget class="QPushButton" name="refreshPortsButton">
+               <property name="text">
+                <string>Refresh Ports</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QGroupBox" name="motorControllerGroupBox">
+               <property name="title">
+                <string>Motor Controller</string>
+               </property>
+               <layout class="QFormLayout" name="robotConnectionLayout_2">
+                <item row="0" column="0">
+                 <widget class="QLabel" name="comPortLabel">
+                  <property name="text">
+                   <string>COM Port:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="0" column="1">
+                 <widget class="QComboBox" name="serialPortComboBox"/>
+                </item>
+                <item row="1" column="1">
+                 <layout class="QHBoxLayout" name="connectionLayout">
+                  <item>
+                   <widget class="QPushButton" name="connectButton">
+                    <property name="text">
+                     <string>Connect</string>
+                    </property>
+                    <property name="checkable">
+                     <bool>true</bool>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QLabel" name="connectionStatusLabel">
+                    <property name="text">
+                     <string>Status: Not Connected</string>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item>
+              <widget class="QGroupBox" name="encoderGroupBox">
+               <property name="title">
+                <string>Encoder</string>
+               </property>
+               <layout class="QFormLayout" name="formLayout_encoder">
+                <item row="0" column="0">
+                 <widget class="QLabel" name="label_encoder_port">
+                  <property name="text">
+                   <string>COM Port:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="0" column="1">
+                 <widget class="QComboBox" name="encoderPortComboBox"/>
+                </item>
+                <item row="1" column="1">
+                 <layout class="QHBoxLayout" name="encoderConnectionLayout">
+                  <item>
+                   <widget class="QPushButton" name="connectEncoderButton">
+                    <property name="text">
+                     <string>Connect</string>
+                    </property>
+                    <property name="checkable">
+                     <bool>true</bool>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QLabel" name="encoderConnectionStatusLabel">
+                    <property name="text">
+                     <string>Status: Not Connected</string>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+               </layout>
+              </widget>
              </item>
              <item>
               <widget class="ctkCollapsibleButton" name="manualControlCollapsibleButton">

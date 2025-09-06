@@ -1,127 +1,131 @@
 [
-    {
-        "name": "Baseplate",
-        "stl_path": "Baseplate.STL",
-        "collision_stl_path": "Baseplate_collision.STL",
-        "parent": null,
-        "fixed_offset_to_parent": null,
-        "has_markers": true,
-        "local_marker_coords": [
-            [-10.0, 20.0, 5.0],
-            [10.0, 20.0, 5.0],
-            [-10.0, -20.0, 5.0]
-        ],
-        "arm_lengths": [40.0, 20.0],
-        "color": [1, 0, 0],
-        "articulation_axis": null
+  {
+    "name": "Baseplate",
+    "stl_path": "Baseplate.STL",
+    "collision_stl_path": "Baseplate_collision.STL",
+    "parent": null,
+    "fixed_offset_to_parent": null,
+    "has_markers": true,
+    "local_marker_coords": [
+      [-10.0, 20.0, 5.0],
+      [10.0, 20.0, 5.0],
+      [-10.0, -20.0, 5.0]
+    ],
+    "arm_lengths": [40.0, 20.0],
+    "color": [1, 0, 0],
+    "articulation_axis": null
+  },
+  {
+    "name": "Joint1",
+    "stl_path": "Joint1.STL",
+    "collision_stl_path": "Shoulder1_collision.STL",
+    "parent": "Baseplate",
+    "fixed_offset_to_parent": { "translate": [0, 0, 20.0] },
+    "has_markers": false,
+    "color": [0, 0.5, 0],
+    "articulation_axis": "IS",
+    "joint_limits": [-180, 180],
+    "command_letter": "A",
+    "steps_per_rev": 3332
+  },
+  {
+    "name": "Joint2",
+    "stl_path": "Joint2.STL",
+    "collision_stl_path": "Link1_collision.STL",
+    "parent": "Joint1",
+    "fixed_offset_to_parent": { "translate": [0, 0, 30] },
+    "has_markers": true,
+    "local_marker_coords": [
+      [12.5, 45.0, 110.0],
+      [-12.5, 45.0, 110.0],
+      [12.5, 45.0, 40.0]
+    ],
+    "arm_lengths": [70.0, 25.0],
+    "color": [0, 1, 0],
+    "articulation_axis": "PA",
+    "joint_limits": [-120, 120],
+    "command_letter": "B",
+    "steps_per_rev": 3332
+  },
+  {
+    "name": "Joint3",
+    "stl_path": "Joint3.STL",
+    "collision_stl_path": "Shoulder2_collision.STL",
+    "parent": "Joint2",
+    "fixed_offset_to_parent": { "translate": [0, 0, 150] },
+    "has_markers": false,
+    "color": [0, 0.5, 0],
+    "articulation_axis": "PA",
+    "joint_limits": [-120, 120],
+    "command_letter": "C",
+    "steps_per_rev": 3332
+  },
+  {
+    "name": "Joint4",
+    "stl_path": "Joint4.STL",
+    "collision_stl_path": "Elbow1_collision.STL",
+    "parent": "Joint3",
+    "fixed_offset_to_parent": { "translate": [0, 0, 0] },
+    "has_markers": true,
+    "local_marker_coords": [
+      [-10, 35.0, 90],
+      [10, 35.0, 90],
+      [-10, -35.0, 90]
+    ],
+    "arm_lengths": [70.0, 20.0],
+    "color": [0, 1, 0],
+    "articulation_axis": "IS",
+    "joint_limits": [-180, 180],
+    "command_letter": "D",
+    "steps_per_rev": 3332
+  },
+  {
+    "name": "Joint5",
+    "stl_path": "Joint5.STL",
+    "collision_stl_path": "Wrist_collision.STL",
+    "parent": "Joint4",
+    "fixed_offset_to_parent": { "translate": [0, 0, 155] },
+    "has_markers": false,
+    "color": [0, 0.5, 0],
+    "articulation_axis": "PA",
+    "joint_limits": [-120, 120],
+    "command_letter": "E",
+    "steps_per_rev": 3332
+  },
+  {
+    "name": "Joint6",
+    "stl_path": "End.STL",
+    "collision_stl_path": "End_collision.STL",
+    "parent": "Joint5",
+    "fixed_offset_to_parent": {
+      "translate": [0, 0, 13]
     },
-    {
-        "name": "Shoulder1",
-        "stl_path": "Shoulder1.STL",
-        "collision_stl_path": "Shoulder1_collision.STL",
-        "parent": "Baseplate",
-        "fixed_offset_to_parent": {"translate": [0, 0, 20.0]},
-        "has_markers": false,
-        "color": [0, 0.5, 0],
-        "articulation_axis": "IS",
-        "joint_limits": [-180, 180],
-        "command_letter": "A",
-        "steps_per_rev": 3332
+    "has_markers": true,
+    "local_marker_coords": [
+      [-10, 22.5, 26],
+      [10, 22.5, 26],
+      [-10, -22.5, 26]
+    ],
+    "arm_lengths": [45.0, 20.0],
+    "color": [1, 0, 0],
+    "articulation_axis": "IS",
+    "joint_limits": [-270, 270],
+    "command_letter": "F",
+    "steps_per_rev": 3332
+  },
+  {
+    "name": "Needle",
+    "stl_path": "Needle.STL",
+    "collision_stl_path": "Needle_collision.STL",
+    "parent": "Joint6",
+    "fixed_offset_to_parent": {
+      "translate": [-50, 0, 71]
     },
-    {
-        "name": "Link1",
-        "stl_path": "Link1.STL",
-        "collision_stl_path": "Link1_collision.STL",
-        "parent": "Shoulder1",
-        "fixed_offset_to_parent": {"translate": [0, 0, 30]},
-        "has_markers": true,
-        "local_marker_coords": [
-            [12.5, 45.0, 110.0],
-            [-12.5, 45.0, 110.0],
-            [12.5, 45.0, 40.0]
-        ],
-        "arm_lengths": [70.0, 25.0],
-        "color": [0, 1, 0],
-        "articulation_axis": "PA",
-        "joint_limits": [-120, 120],
-        "command_letter": "B",
-        "steps_per_rev": 3332
-    },
-    {
-        "name": "Shoulder2",
-        "stl_path": "Shoulder2.STL",
-        "collision_stl_path": "Shoulder2_collision.STL",
-        "parent": "Link1",
-        "fixed_offset_to_parent": {"translate": [0, 0, 150]},
-        "has_markers": false,
-        "color": [0, 0.5, 0],
-        "articulation_axis": "PA",
-        "joint_limits": [-120, 120],
-        "command_letter": "C",
-        "steps_per_rev": 3332
-    },
-    {
-        "name": "Elbow1",
-        "stl_path": "Elbow1.STL",
-        "collision_stl_path": "Elbow1_collision.STL",
-        "parent": "Shoulder2",
-        "fixed_offset_to_parent": {"translate": [0, 0, 0]},
-        "has_markers": true,
-        "local_marker_coords": [
-            [-10, 35.0, 85],
-            [10, 35.0, 85],
-            [-10, -35.0, 85]
-        ],
-        "arm_lengths": [70.0, 20.0],
-        "color": [0, 1, 0],
-        "articulation_axis": "IS",
-        "joint_limits": [-180, 180],
-        "command_letter": "D",
-        "steps_per_rev": 3332
-    },
-    {
-        "name": "Wrist",
-        "stl_path": "Wrist.STL",
-        "collision_stl_path": "Wrist_collision.STL",
-        "parent": "Elbow1",
-        "fixed_offset_to_parent": {"translate": [0, 0, 150]},
-        "has_markers": false,
-        "color": [0, 0.5, 0],
-        "articulation_axis": "PA",
-        "joint_limits": [-120, 120],
-        "command_letter": "E",
-        "steps_per_rev": 3332
-    },
-    {
-        "name": "End",
-        "stl_path": "End.STL",
-        "collision_stl_path": "End_collision.STL",
-        "parent": "Wrist",
-        "fixed_offset_to_parent": {"translate": [0, 0, 8]},
-        "has_markers": true,
-        "local_marker_coords": [
-            [-10, 22.5, 26],
-            [10, 22.5, 26],
-            [-10, -22.5, 26]
-        ],
-        "arm_lengths": [45.0, 20.0],
-        "color": [1, 0, 0],
-        "articulation_axis": "IS",
-        "joint_limits": [-270, 270],
-        "command_letter": "F",
-        "steps_per_rev": 3332
-    },
-    {
-        "name": "Needle",
-        "stl_path": "Needle.STL",
-        "collision_stl_path": "Needle_collision.STL",
-        "parent": "End",
-        "fixed_offset_to_parent": {"translate": [-50, 0, 71]},
-        "has_markers": false,
-        "color": [1, 0, 0],
-        "articulation_axis": "TRANS_X",
-        "joint_limits": [0, 0],
-        "needle_tip_local": [0, 0, 0],
-        "needle_axis_local": [1, 0, 0]
-    }
+    "has_markers": false,
+    "color": [1, 0, 0],
+    "articulation_axis": "TRANS_X",
+    "joint_limits": [0, 0],
+    "needle_tip_local": [0, 0, 0],
+    "needle_axis_local": [1, 0, 0]
+  }
 ]
