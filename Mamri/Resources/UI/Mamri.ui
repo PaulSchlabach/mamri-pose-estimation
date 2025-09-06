@@ -263,8 +263,7 @@
                 <string>Automatically find the point on the patient's skin closest to the target marker and set it as the Entry Point.</string>
                </property>
                <property name="text">
-                <string>Find Optimal Entry Point</string>
-               </property>
+                <string>Find Closest Suitable Entry Point</string> </property>
               </widget>
              </item>
              <item row="4" column="0">
@@ -794,14 +793,29 @@
                 <item row="1" column="0">
                  <widget class="QLabel" name="label_7">
                   <property name="text">
-                   <string>Step Size (deg):</string>
+                   <string>Step Size (steps):</string>
                   </property>
                  </widget>
                 </item>
                 <item row="1" column="1">
                  <widget class="QDoubleSpinBox" name="jogStepSpinBox">
-                  <property name="value">
+                  <property name="toolTip">
+                   <string>Set the number of steps to move the joint with each click.</string>
+                  </property>
+                  <property name="decimals">
+                   <number>0</number>
+                  </property>
+                  <property name="maximum">
+                   <double>5000</double>
+                  </property>
+                  <property name="minimum">
                    <double>1</double>
+                  </property>
+                  <property name="singleStep">
+                   <double>1</double>
+                  </property>
+                  <property name="value">
+                   <double>50</double>
                   </property>
                  </widget>
                 </item>

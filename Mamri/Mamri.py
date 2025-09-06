@@ -594,42 +594,52 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.logic.stop_trajectory_execution()
 
     def _setupUIComponents(self):
-        """Initializes the new UI components like tables and combo boxes."""
+        """Initializes the UI components like tables and combo boxes."""
         if not hasattr(self.ui, "jointStatusTableWidget"):
             return
+
+        # NOTE: The programmatic changes to the button text have been removed
+        # as they are now correctly defined in the .ui.xml file.
 
         self.ui.jogJointComboBox.clear()
         self.ui.jogJointComboBox.addItems(self.logic.articulated_chain if self.logic else [])
         self.num_joints = len(self.logic.articulated_chain) if self.logic else 6
 
-        # A helper function to configure a table
-        def configure_table(table, headers):
+        def configure_table(table, headers, row_labels):
             table.clear()
-            table.setRowCount(self.num_joints)
+            table.setRowCount(len(row_labels))
             table.setColumnCount(len(headers))
             table.setHorizontalHeaderLabels(headers)
             table.verticalHeader().setVisible(False)
-            for i in range(self.num_joints):
-                joint_name = self.logic.articulated_chain[i] if self.logic and i < len(self.logic.articulated_chain) else f"J{i+1}"
-                item = qt.QTableWidgetItem(joint_name)
+            for i, label in enumerate(row_labels):
+                item = qt.QTableWidgetItem(label)
                 item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
                 table.setItem(i, 0, item)
             table.resizeColumnsToContents()
             table.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
             table.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
 
-        # Configure all tables
-        configure_table(self.ui.jointStatusTableWidget, ["Joint", "Current\n(deg)", "Current\n(steps)", "Target\n(deg)", "Target\n(steps)"])
-        configure_table(self.ui.estimatedPoseTableWidget, ["Joint", "Steps", "Degrees (°)"])
-        
-        # Setup new trajectory info tables
-        self.ui.trajectoryStartPoseTable.setToolTip("The starting pose of the planned trajectory (from estimated pose).")
-        self.ui.trajectoryEndPoseTable.setToolTip("The final target pose of the planned trajectory.")
-        configure_table(self.ui.trajectoryStartPoseTable, ["Start Pose", "Steps", "Degrees (°)"])
-        configure_table(self.ui.trajectoryEndPoseTable, ["End Pose", "Steps", "Degrees (°)"])
+        joint_names = self.logic.articulated_chain if self.logic else [f"J{i+1}" for i in range(self.num_joints)]
 
+        status_headers = ["Joint", "Encoder\n(steps)", "Controller\n(steps)", "Target\n(steps)"]
+        self.ui.jointStatusTableWidget.setColumnCount(len(status_headers))
+        configure_table(self.ui.jointStatusTableWidget, status_headers, joint_names)
+        
+        pose_headers = ["Joint", "Steps", "Degrees (°)"]
+        configure_table(self.ui.estimatedPoseTableWidget, pose_headers, joint_names)
+        configure_table(self.ui.trajectoryStartPoseTable, ["Start Pose", "Steps", "Degrees (°)"], joint_names)
+        configure_table(self.ui.trajectoryEndPoseTable, ["End Pose", "Steps", "Degrees (°)"], joint_names)
+    
     def updateStatusDisplay(self, live_mc_pose_steps=None):
-        """Refreshes all status displays in the UI."""
+        """Refreshes all status displays in the UI, now including live encoder data."""
+        # --- Get Encoder Data (Source of Truth) ---
+        live_encoder_steps = None
+        if self.logic:
+            with self.logic.encoder_data_lock:
+                # Make a copy to avoid holding the lock for too long
+                live_encoder_steps = list(self.logic.true_encoder_position)
+
+        # --- Get Motor Controller Data ---
         if live_mc_pose_steps is None:
             if self.logic and self.logic.is_motor_controller_connected() and not self._isExecuting:
                 all_positions = self.logic.get_current_positions()
@@ -638,17 +648,17 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             else:
                 live_mc_pose_steps = None
         
-        pose_for_tcp = live_mc_pose_steps if live_mc_pose_steps is not None else self.lastEstimatedPoseSteps
-
+        # --- Update TCP and IK error based on the most reliable position data available ---
+        pose_for_tcp_calc = live_encoder_steps if live_encoder_steps and any(live_encoder_steps) else live_mc_pose_steps
         ik_error_text, tcp_x, tcp_y, tcp_z = "n/a", "---", "---", "---"
         if self.logic and self.logic.last_ik_error is not None:
             ik_error_text = f"{self.logic.last_ik_error:.4f} mm"
 
-        if pose_for_tcp is not None and self.logic:
+        if pose_for_tcp_calc is not None and self.logic:
             if base_node := self.logic.jointTransformNodes.get("Baseplate"):
                 base_transform_vtk = vtk.vtkMatrix4x4()
                 base_node.GetMatrixTransformToWorld(base_transform_vtk)
-                pose_rad = self.logic._convert_steps_array_to_angles(np.array(pose_for_tcp))
+                pose_rad = self.logic._convert_steps_array_to_angles(np.array(pose_for_tcp_calc))
                 joint_values_rad = dict(zip(self.logic.articulated_chain, pose_rad))
                 tcp_transform = self.logic._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform_vtk)
                 if tcp_transform:
@@ -661,34 +671,29 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.tcpYLabel.text = tcp_y
         self.ui.tcpZLabel.text = tcp_z
 
+        # --- Populate the Status Table ---
         table = self.ui.jointStatusTableWidget
         for i in range(self.num_joints):
-            # The direction multiplier is no longer needed for display purposes.
-            # --- CURRENT POSE ---
-            if live_mc_pose_steps is not None and i < len(live_mc_pose_steps):
-                true_steps = live_mc_pose_steps[i]
-                raw_angle_rad = self.logic._convert_steps_to_angle_rad(true_steps, i)
-                conventional_angle_deg = math.degrees(raw_angle_rad)
-                display_steps = int(true_steps)
-                
-                deg_item = qt.QTableWidgetItem(f"{conventional_angle_deg: >7.2f}")
-                step_item = qt.QTableWidgetItem(f"{display_steps: >5}")
+            # Column 1: Encoder Steps
+            if live_encoder_steps is not None:
+                enc_item = qt.QTableWidgetItem(f"{live_encoder_steps[i]: >5}")
             else:
-                deg_item, step_item = qt.QTableWidgetItem("---"), qt.QTableWidgetItem("---")
-
-            # --- TARGET POSE ---
-            if self.logicTargetSteps is not None and i < len(self.logicTargetSteps):
-                target_true_steps = int(self.logicTargetSteps[i])
-                target_raw_angle_rad = self.logic._convert_steps_to_angle_rad(target_true_steps, i)
-                target_conventional_angle_deg = math.degrees(target_raw_angle_rad)
-                target_display_steps = int(target_true_steps)
-
-                target_deg_item = qt.QTableWidgetItem(f"{target_conventional_angle_deg: >7.2f}")
-                target_step_item = qt.QTableWidgetItem(f"{target_display_steps: >5}")
-            else:
-                target_deg_item, target_step_item = qt.QTableWidgetItem("---"), qt.QTableWidgetItem("---")
+                enc_item = qt.QTableWidgetItem("---")
             
-            for col, item in enumerate([deg_item, step_item, target_deg_item, target_step_item], 1):
+            # Column 2: Controller Steps
+            if live_mc_pose_steps is not None:
+                mc_item = qt.QTableWidgetItem(f"{live_mc_pose_steps[i]: >5}")
+            else:
+                mc_item = qt.QTableWidgetItem("---")
+
+            # Column 3: Target Steps
+            if self.logicTargetSteps is not None and i < len(self.logicTargetSteps):
+                target_steps = int(self.logicTargetSteps[i])
+                target_item = qt.QTableWidgetItem(f"{target_steps: >5}")
+            else:
+                target_item = qt.QTableWidgetItem("---")
+            
+            for col, item in enumerate([enc_item, mc_item, target_item], 1):
                 item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
                 item.setTextAlignment(qt.Qt.AlignCenter)
                 table.setItem(i, col, item)
@@ -701,41 +706,34 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         slicer.app.processEvents()
     
     def onJogClicked(self, is_positive: bool):
-        """Handles clicks for both jog buttons."""
-        if self._isExecuting or not self.logic.is_robot_connected():
+        """Handles clicks for both jog buttons, now sending integer steps to the logic layer."""
+        if self._isExecuting or not self.logic.is_motor_controller_connected():
             slicer.util.warningDisplay("Cannot jog robot while another action is running or disconnected.")
             return
 
         self._isExecuting = True
         self._checkAllButtons()
-        self.statusUpdateTimer.stop() # Pause polling
+        self.statusUpdateTimer.stop()
 
         try:
             joint_index = self.ui.jogJointComboBox.currentIndex
-            degrees = self.ui.jogStepSpinBox.value
+            # Read the value as an integer number of steps
+            steps_to_move = int(self.ui.jogStepSpinBox.value)
+            
             if not is_positive:
-                degrees *= -1
+                steps_to_move *= -1
 
-            # Update the UI to show this as the new target
-            current_pos = self.logic.get_current_positions()
-            if current_pos:
-                target_rad = self.logic._convert_steps_to_angle_rad(current_pos[joint_index], joint_index) + math.radians(degrees)
-                self.logicTargetSteps = self.logic._convert_angles_to_steps_array(self.logic._get_current_joint_angles(self.logic.articulated_chain))
-                target_steps_for_joint = self.logic._convert_angles_to_steps_array([target_rad])[0]
-                self.logicTargetSteps[joint_index] = target_steps_for_joint
-                self.updateStatusDisplay(current_pos)
-
-            # Call the blocking jog function
-            self.logic.jog_joint(joint_index, degrees, self.updateStatusDisplay)
+            # Call the logic function, now passing steps directly
+            self.logic.jog_joint(joint_index, steps_to_move, self.updateStatusDisplay)
 
         finally:
             self._isExecuting = False
-            self.logicTargetSteps = None # Clear target after jog
+            self.logicTargetSteps = None
             self.updateStatusDisplay()
-            if self.logic.is_robot_connected():
-                self.statusUpdateTimer.start() # Resume polling
+            if self.logic.is_motor_controller_connected():
+                self.statusUpdateTimer.start()
             self._checkAllButtons()
-
+              
     def _onParameterNodeModified(self, caller, event) -> None:
         """This function is called when any property in the parameter node is changed."""
         # Check if the target fiducial node itself has been changed
@@ -836,23 +834,57 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.MASTER_FOLDER_NAME = "MAMRI Robot Output"
         self.DEBUG_COLLISIONS = False 
         
-        # --- New Properties for Robot Control ---
+        # --- Properties for Robot Control ---
         self.motor_controller_serial = None
-        self.encoder_serial = None # Renamed from pico_encoder_serial
+        self.encoder_serial = None
         
         # --- Threading for Encoder Listener ---
-        self.encoder_listener_thread = None # Renamed from pico_listener_thread
-        self.stop_encoder_thread_flag = threading.Event() # Renamed from stop_pico_thread_flag
-        self.encoder_data_lock = threading.Lock() # Renamed from pico_data_lock
-        
-        # This will store the latest true position from the Encoder
+        self.encoder_listener_thread = None
+        self.stop_encoder_thread_flag = threading.Event()
+        self.encoder_data_lock = threading.Lock()
         self.true_encoder_position = [0] * len(self.articulated_chain)
+        
+        # --- State Management and Synchronization ---
+        self.STATE_IDLE = 0
+        self.STATE_MOVING = 1
+        self.robot_state = self.STATE_IDLE
+        self.DISCREPANCY_THRESHOLD = 5 # Steps
+        self.sync_timer = qt.QTimer()
+        self.sync_timer.setInterval(250) # Check every 250ms
+        self.sync_timer.timeout.connect(self._perform_sync_check)
         
         self.stop_execution_flag = False
         self.last_ik_error = None
 
         self._discover_robot_nodes_in_scene()
+        
+    def _perform_sync_check(self):
+        """Periodically checks for discrepancy between encoder and controller, and corrects if idle."""
+        if not self.is_motor_controller_connected() or not self.is_encoder_connected():
+            return
 
+        # Only perform check if the robot is supposed to be idle
+        if self.robot_state == self.STATE_IDLE:
+            controller_pos = self.get_current_positions()
+            if controller_pos is None:
+                return
+
+            with self.encoder_data_lock:
+                encoder_pos = list(self.true_encoder_position)
+
+            # Check for significant discrepancy
+            needs_correction = False
+            for i in range(len(self.articulated_chain)):
+                if abs(controller_pos[i] - encoder_pos[i]) > self.DISCREPANCY_THRESHOLD:
+                    needs_correction = True
+                    break
+            
+            if needs_correction:
+                logging.info(f"Discrepancy detected. Encoder: {encoder_pos}, Controller: {controller_pos}. Correcting controller state.")
+                # Construct S command with all 8 values, using encoder data for the first 6
+                command_payload = ",".join(map(str, encoder_pos)) + ",0,0" 
+                self.send_command_to_robot(f"S{command_payload}")
+    
     def setRobotPose(self, joint_angles_rad: np.ndarray):
         """
         Sets the robot's joint angles to a specific configuration.
@@ -1162,18 +1194,19 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return [port.device for port in ports]
 
     def connect_to_motor_controller(self, port: str) -> bool:
-        """Establishes a serial connection with the robot motor controller."""
+        """Establishes a serial connection with the robot motor controller and starts the sync timer."""
         if self.is_motor_controller_connected():
             self.disconnect_from_motor_controller()
         try:
             self.motor_controller_serial = serial.Serial(port, 115200, timeout=1, write_timeout=1)
             logging.info(f"Successfully connected to motor controller on port {port}.")
+            self.sync_timer.start()
             return True
         except serial.SerialException as e:
             logging.error(f"Failed to connect to motor controller on port {port}: {e}")
             self.motor_controller_serial = None
             return False
-    
+        
     def connect_to_encoder(self, port: str) -> bool:
         """Establishes connection to the Encoder (Pico) and starts the listener thread."""
         if self.is_encoder_connected():
@@ -1235,12 +1268,13 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         logging.info("Encoder listener thread stopped.")
 
     def disconnect_from_motor_controller(self) -> None:
-        """Closes the serial connection to the motor controller."""
+        """Closes the serial connection to the motor controller and stops the sync timer."""
+        self.sync_timer.stop()
         if self.motor_controller_serial and self.motor_controller_serial.is_open:
             self.motor_controller_serial.close()
             logging.info(f"Disconnected from motor controller serial port.")
         self.motor_controller_serial = None
-
+    
     def is_motor_controller_connected(self) -> bool:
         """Checks if the serial connection to the motor controller is active."""
         return self.motor_controller_serial is not None and self.motor_controller_serial.is_open
@@ -1403,17 +1437,22 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return body_poly
 
     def findAndSetEntryPoint(self, pNode: 'MamriParameterNode') -> None:
-        targetNode = pNode.targetFiducialNode
-        # Find the segmentation node by name instead of using the parameter node
+        """
+        Finds the closest suitable entry point on the body surface, favoring lateral (side) approaches.
+        This function uses a scoring system to evaluate candidate points based on their surface normal.
+        """
+        targetNode = pNode.targetFiducialNode  # Corrected typo
         segmentationNode = slicer.mrmlScene.GetFirstNodeByName("AutoBodySegmentation")
-        
+
         if not (targetNode and targetNode.GetNumberOfControlPoints() > 0 and segmentationNode):
-            slicer.util.errorDisplay("Please place a target marker and ensure 'AutoBodySegmentation' exists (run pose estimation).")
+            slicer.util.errorDisplay("Please place a target marker and ensure 'AutoBodySegmentation' exists.")
             return
-            
+
         body_poly = self._get_body_polydata(segmentationNode)
         if not body_poly:
             return
+
+        # 1. Ensure polydata has surface normals
         normals = vtk.vtkPolyDataNormals()
         normals.SetInputData(body_poly)
         normals.ComputePointNormalsOn()
@@ -1421,38 +1460,55 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         normals.Update()
         polydata_with_normals = normals.GetOutput()
         point_normals_array = polydata_with_normals.GetPointData().GetNormals()
+
+        # 2. Find all points on the body surface near the target
         point_locator = vtk.vtkStaticPointLocator()
         point_locator.SetDataSet(polydata_with_normals)
         point_locator.BuildLocator()
-        target_pos = targetNode.GetNthControlPointPositionWorld(0)
+
+        target_pos = np.array(targetNode.GetNthControlPointPositionWorld(0))
         result_point_ids = vtk.vtkIdList()
         search_radius = 80.0
         point_locator.FindPointsWithinRadius(search_radius, target_pos, result_point_ids)
-        up_vector = np.array([0, 1, 0])
-        normal_threshold = 0.2 
-        candidate_points = []
+
+        # 3. Score each point and find the best candidate
+        suitable_points = []
         for i in range(result_point_ids.GetNumberOfIds()):
             point_id = result_point_ids.GetId(i)
             point_normal = np.array(point_normals_array.GetTuple(point_id))
-            if np.dot(point_normal, up_vector) > normal_threshold:
-                point_coords = np.array(polydata_with_normals.GetPoint(point_id))
-                distance = np.linalg.norm(point_coords - np.array(target_pos))
-                candidate_points.append({"coords": point_coords, "distance": distance})
-        if not candidate_points:
-            slicer.util.warningDisplay(f"Could not find a suitable entry point on an accessible surface within a {search_radius}mm radius of the target.")
-            return
-        best_candidate = min(candidate_points, key=lambda x: x["distance"])
-        closest_point_coords = best_candidate["coords"]
-        optimalEntryPointNodeName = "OptimalEntryPoint"
-        if oldEntryNode := slicer.mrmlScene.GetFirstNodeByName(optimalEntryPointNodeName):
-            slicer.mrmlScene.RemoveNode(oldEntryNode)
-        entryNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", optimalEntryPointNodeName)
-        entryNode.GetDisplayNode().SetSelectedColor(1.0, 1.0, 0.0)
-        entryNode.AddControlPointWorld(vtk.vtkVector3d(closest_point_coords))
-        entryNode.SetNthControlPointLabel(0, "Optimal Entry (Accessible)")
-        pNode.entryPointFiducialNode = entryNode
-        slicer.util.infoDisplay("Accessible optimal entry point has been calculated and set.")
 
+            # Scoring Logic (RAS coordinates: R=x, A=y, S=z)
+            # We want a normal with a high R-L component (abs(nx)) and a low A-P component (abs(ny)).
+            # We penalize the A-P component more heavily to avoid top/bottom surfaces.
+            suitability_score = abs(point_normal[0]) - 2 * abs(point_normal[1])
+
+            # Only consider points that are not strongly facing up or down
+            if suitability_score > -0.5:
+                point_coords = np.array(polydata_with_normals.GetPoint(point_id))
+                distance = np.linalg.norm(point_coords - target_pos)
+                suitable_points.append({"coords": point_coords, "distance": distance})
+
+        if not suitable_points:
+            slicer.util.warningDisplay(f"Could not find a suitable side-entry point within {search_radius}mm of the target.")
+            return
+
+        # 4. Find the closest among the suitable points
+        best_candidate = min(suitable_points, key=lambda x: x["distance"])
+        closest_point_coords = best_candidate["coords"]
+
+        # 5. Create the new fiducial node with the updated name
+        newNodeName = "ClosestSuitableEntryPoint"
+        if oldEntryNode := slicer.mrmlScene.GetFirstNodeByName(newNodeName):
+            slicer.mrmlScene.RemoveNode(oldEntryNode)
+
+        entryNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", newNodeName)
+        entryNode.GetDisplayNode().SetSelectedColor(0.0, 1.0, 0.5) # A nice green color
+        entryNode.AddControlPointWorld(vtk.vtkVector3d(closest_point_coords))
+        entryNode.SetNthControlPointLabel(0, "Suitable Entry")
+
+        pNode.entryPointFiducialNode = entryNode
+        slicer.util.infoDisplay("Closest suitable side-entry point has been calculated and set.")
+    
     def _ik_pose_error_function(self, angles_rad, articulated_joint_names, target_transform, base_transform):
         joint_values_rad = {name: angle for name, angle in zip(articulated_joint_names, angles_rad)}
         fk_transform = self._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform)
@@ -1498,7 +1554,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         if not solve_only:
             logging.info("Starting trajectory goal calculation...")
         
-        targetNode, entryNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode
+        targetNode, entryNode = pNode.targetFiducialNode, pNode.entryPointFiducialNode # Corrected typo
         # Find the segmentation node by name
         segmentationNode = slicer.mrmlScene.GetFirstNodeByName("AutoBodySegmentation")
 
@@ -1928,106 +1984,146 @@ class MamriLogic(ScriptedLoadableModuleLogic):
     
     def return_to_zero_position(self, status_callback=None):
         """
-        Commands the robot to move to the home position (all joints at 0 steps).
-        This function is BLOCKING and uses a callback to update the UI.
+        Commands the robot to move to the home position (all joints at 0 steps)
+        using the new robust movement logic.
         """
         target_pose_steps = np.zeros(len(self.articulated_chain), dtype=int)
         self.move_to_specific_pose(target_pose_steps, status_callback, "Homing")
-
+    
     def move_to_specific_pose(self, target_pose_steps: np.ndarray, status_callback=None, mode="Moving") -> bool:
         """
-        Commands the robot to move to a specific pose defined by step counts.
-        This function is BLOCKING. It sends all joint commands once, then polls
-        for arrival status.
-        Returns True on success, False on failure (timeout or stop).
+        Commands the robot to a target pose.
+        Operates in Closed-Loop (encoder) or Open-Loop (no encoder) mode.
         """
         if not self.is_motor_controller_connected():
-            logging.error("Execution failed: Robot not connected.")
+            logging.error("Execution failed: Motor controller not connected.")
             if status_callback: status_callback()
             return False
 
         self.stop_execution_flag = False
         num_joints = len(self.articulated_chain)
-        logging.info(f"\n--- Commanding Robot to {mode}: Target = {target_pose_steps.tolist()} ---")
 
-        # --- Send all movement commands once at the beginning ---
-        for joint_index in range(num_joints):
-            joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
-            command_letter = joint_def["command_letter"]
-            command = f"{command_letter}{int(target_pose_steps[joint_index])}"
-            self.send_command_to_robot(command)
+        # --- MODE SELECTION ---
+        if self.is_encoder_connected():
+            # --- CLOSED-LOOP MODE (Command, Verify, Correct) ---
+            max_retries = 3
+            arrival_tolerance = 2 # Steps
 
-        # --- Poll for arrival ---
-        timeout = 120.0  # seconds
-        start_time = time.time()
+            for attempt in range(max_retries):
+                if self.stop_execution_flag:
+                    logging.info(f"Movement ({mode}) stopped by user.")
+                    self.robot_state = self.STATE_IDLE
+                    return False
 
-        while time.time() - start_time < timeout:
-            if self.stop_execution_flag:
-                logging.info(f"{mode} stopped by user.")
-                return False
+                logging.info(f"--- Closed-Loop {mode} (Attempt {attempt + 1}/{max_retries}): Target = {target_pose_steps.tolist()} ---")
+                
+                self.robot_state = self.STATE_MOVING
+                for idx in range(num_joints):
+                    joint_def = self.get_joint_definition(idx)
+                    command = f"{joint_def['command_letter']}{int(target_pose_steps[idx])}"
+                    self.send_command_to_robot(command)
 
-            live_positions = self.get_current_positions()
-            if live_positions is None:
-                time.sleep(0.1)  # Wait before retrying
-                continue
+                timeout = 120.0
+                start_time = time.time()
+                controller_arrived = False
+                while time.time() - start_time < timeout:
+                    if self.stop_execution_flag: break
+                    live_mc_pos = self.get_current_positions()
+                    if live_mc_pos:
+                        if status_callback: status_callback(np.array(live_mc_pos[:num_joints]))
+                        if np.all(np.abs(np.array(live_mc_pos[:num_joints]) - target_pose_steps) <= arrival_tolerance):
+                            controller_arrived = True
+                            break
+                    time.sleep(0.1)
 
-            live_pose_steps = np.array(live_positions[:num_joints])
+                time.sleep(0.2) # Settling period
+                self.robot_state = self.STATE_IDLE
+                
+                with self.encoder_data_lock:
+                    final_encoder_pos = np.array(self.true_encoder_position)
+                
+                if status_callback: status_callback(self.get_current_positions())
 
-            # Update simulation and UI
-            live_pose_rad = self._convert_steps_array_to_angles(live_pose_steps)
-            self.setRobotPose(live_pose_rad)
-            if status_callback:
-                status_callback(live_pose_steps)
+                if np.all(np.abs(final_encoder_pos - target_pose_steps) <= arrival_tolerance):
+                    logging.info(f"SUCCESS: Target reached for '{mode}'. Encoder confirms position.")
+                    return True
+                else:
+                    logging.warning(f"Target missed. Target: {target_pose_steps.tolist()}, Final Encoder: {final_encoder_pos.tolist()}.")
+                    self._perform_sync_check()
+                    time.sleep(0.1)
+            
+            logging.error(f"Failed to reach target for '{mode}' after {max_retries} attempts.")
+            self.robot_state = self.STATE_IDLE
+            return False
 
-            # Check for arrival (using a tolerance of +/- 2 steps)
-            if np.all(np.abs(live_pose_steps - target_pose_steps) <= 2):
-                logging.info(f"Robot has reached the target pose for '{mode}'.")
-                # Do a final UI update to show the final position
-                if status_callback: status_callback(live_pose_steps)
-                return True
+        else:
+            # --- OPEN-LOOP MODE (Trust the Controller) ---
+            logging.warning("Encoder not connected. Running in open-loop mode; position accuracy not guaranteed.")
+            
+            self.robot_state = self.STATE_MOVING
+            for idx in range(num_joints):
+                joint_def = self.get_joint_definition(idx)
+                command = f"{joint_def['command_letter']}{int(target_pose_steps[idx])}"
+                self.send_command_to_robot(command)
+            
+            timeout = 120.0
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if self.stop_execution_flag:
+                    logging.info(f"{mode} stopped by user.")
+                    self.robot_state = self.STATE_IDLE
+                    return False
 
-            time.sleep(0.1)  # Control loop rate
-
-        # This part is only reached on timeout
-        logging.error(f"TIMEOUT: Robot failed to reach target pose during '{mode}'.")
-        return False
-
-    # --- Start of the new jog_joint function. Notice the proper indentation and newlines. ---
-    def jog_joint(self, joint_index: int, degrees_to_move: float, status_callback=None):
-        """Moves a single joint by a relative amount in degrees."""
-        if not self.is_robot_connected():
+                live_positions = self.get_current_positions()
+                if live_positions:
+                    live_pose_steps = np.array(live_positions[:num_joints])
+                    if status_callback: status_callback(live_pose_steps)
+                    if np.all(np.abs(live_pose_steps - target_pose_steps) <= 2):
+                        logging.info(f"Open-loop move for '{mode}' complete. Controller reports arrival.")
+                        self.robot_state = self.STATE_IDLE
+                        if status_callback: status_callback(live_pose_steps)
+                        return True
+                time.sleep(0.1)
+            
+            logging.error(f"TIMEOUT: Robot failed to reach target pose during open-loop '{mode}'.")
+            self.robot_state = self.STATE_IDLE
+            return False
+    
+    def jog_joint(self, joint_index: int, steps_to_move: int, status_callback=None):
+        """
+        Moves a single joint by a relative number of steps.
+        """
+        if not self.is_motor_controller_connected():
             logging.warning("Cannot jog: Robot not connected.")
             return
-            
+                
         if not (0 <= joint_index < len(self.articulated_chain)):
             logging.error(f"Cannot jog: Invalid joint index {joint_index}.")
             return
 
-        # 1. Get current position
-        initial_positions = self.get_current_positions()
-        if initial_positions is None:
+        initial_pos_steps = None
+        if self.is_encoder_connected():
+            with self.encoder_data_lock:
+                initial_pos_steps = np.array(self.true_encoder_position)
+        else:
+            controller_pos = self.get_current_positions()
+            if controller_pos:
+                initial_pos_steps = np.array(controller_pos[:len(self.articulated_chain)])
+
+        if initial_pos_steps is None:
             logging.error("Cannot jog: Failed to get current robot position.")
             return
+
+        current_steps = initial_pos_steps[joint_index]
         
-        current_steps = initial_positions[joint_index]
-
-        # 2. Calculate target position
-        joint_def = self.robot_definition_dict[self.articulated_chain[joint_index]]
-        steps_per_rev = joint_def.get("steps_per_rev", 0)
-        if steps_per_rev == 0:
-            logging.error(f"Cannot jog joint {joint_def['name']}: 'steps_per_rev' is not defined.")
-            return
-
-        steps_to_move = int(degrees_to_move * (steps_per_rev / 360.0))
-        target_steps = current_steps + steps_to_move
+        target_steps_for_joint = current_steps + steps_to_move
         
-        # 3. Create a full target pose array (only one joint moves)
-        target_pose_steps = np.array(initial_positions[:len(self.articulated_chain)])
-        target_pose_steps[joint_index] = target_steps
-
-        # 4. Use the main move function to perform the action
+        target_pose_steps = np.copy(initial_pos_steps)
+        target_pose_steps[joint_index] = target_steps_for_joint
+        
+        joint_def = self.get_joint_definition(joint_index)
         self.move_to_specific_pose(target_pose_steps, status_callback, f"Jogging {joint_def['name']}")
-
+    
     def _toggle_mri_fiducials(self, checked: bool):
         """Toggles visibility of only the fiducials detected from the MRI scan."""
         self.markers_visible = checked
