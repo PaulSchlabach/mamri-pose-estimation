@@ -1,2 +1,4 @@
 *.stl
 ui.xml
+Mamri/__pycache__/
+build/
