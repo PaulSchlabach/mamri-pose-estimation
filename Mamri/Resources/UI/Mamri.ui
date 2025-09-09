@@ -130,7 +130,7 @@
                <property name="minimumSize">
                 <size>
                  <width>0</width>
-                 <height>245</height>
+                 <height>198</height>
                 </size>
                </property>
                <property name="verticalScrollBarPolicy">
@@ -371,6 +371,29 @@
                </layout>
               </widget>
              </item>
+             <item row="7" column="0" colspan="2">
+              <widget class="QGroupBox" name="encoderCommandGroupBox">
+               <property name="title">
+                <string>Manual Encoder Command</string>
+               </property>
+               <layout class="QHBoxLayout" name="horizontalLayout_encoder_command">
+                <item>
+                 <widget class="QLineEdit" name="encoderCommandLineEdit">
+                  <property name="placeholderText">
+                   <string>Enter command (e.g., R)</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="sendEncoderCommandButton">
+                  <property name="text">
+                   <string>Send</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
             </layout>
            </widget>
           </item>
@@ -422,7 +445,7 @@
                <property name="minimumSize">
                 <size>
                  <width>0</width>
-                 <height>260</height>
+                 <height>210</height>
                 </size>
                </property>
                <property name="verticalScrollBarPolicy">
@@ -657,7 +680,7 @@
                  <property name="minimumSize">
                   <size>
                    <width>0</width>
-                   <height>245</height>
+                   <height>198</height>
                   </size>
                  </property>
                  <property name="verticalScrollBarPolicy">
@@ -676,7 +699,7 @@
                  <property name="minimumSize">
                   <size>
                    <width>0</width>
-                   <height>245</height>
+                   <height>198</height>
                   </size>
                  </property>
                  <property name="verticalScrollBarPolicy">
