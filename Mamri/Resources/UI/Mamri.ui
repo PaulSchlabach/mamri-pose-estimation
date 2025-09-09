@@ -263,7 +263,8 @@
                 <string>Automatically find the point on the patient's skin closest to the target marker and set it as the Entry Point.</string>
                </property>
                <property name="text">
-                <string>Find Closest Suitable Entry Point</string> </property>
+                <string>Find Closest Suitable Entry Point</string>
+               </property>
               </widget>
              </item>
              <item row="4" column="0">
@@ -354,6 +355,16 @@
                   </property>
                   <property name="text">
                    <string>Move to Estimated Pose</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="2" column="0" colspan="2">
+                 <widget class="QPushButton" name="zeroHardwareButton">
+                  <property name="toolTip">
+                   <string>Sends commands to zero the positions of the physical encoder and motor controller. Use for calibration.</string>
+                  </property>
+                  <property name="text">
+                   <string>Zero Hardware Pose</string>
                   </property>
                  </widget>
                 </item>
@@ -932,7 +943,7 @@
          <property name="title">
           <string>Debugging</string>
          </property>
-         <layout class="QFormLayout" name="formLayout_5">
+         <layout class="QGridLayout" name="gridLayout_4">
           <item row="0" column="0">
            <widget class="QLabel" name="label_debugMarkers">
             <property name="text">

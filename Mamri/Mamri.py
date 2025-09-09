@@ -80,17 +80,160 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # --- State for Trajectory & Execution ---
         self.trajectoryPath = None
         self.trajectoryKeyframes = None
-        self._isExecuting = False 
         self.lastEstimatedPoseSteps = None
         self.logicTargetSteps = None 
-        self.num_joints = 6 
+        self.num_joints = 0 # Will be initialized in setup
 
-        # --- Timer for Live Robot Status Polling (Motor Controller) ---
+        # --- Timer for Robot Task Execution ---
+        self.robotTaskTimer = qt.QTimer()
+        self.robotTaskTimer.setInterval(150)  # Check status every 150ms
+        self.robotTaskTimer.timeout.connect(self._onRobotTaskStep)
+        self._task_state = {}  # Holds all info about the running task
+
+        # --- Timers for Live Status Polling ---
         self.statusUpdateTimer = qt.QTimer()
+        self._last_heavy_update_time = 0 # Timestamp for throttling heavy updates
         
-
         self._targetFiducialObserverTags = []
+        
+    def _startRobotTask(self, mode, **kwargs):
+        """Initializes and starts a new robot task using the QTimer."""
+        if self.robotTaskTimer.isActive():
+            slicer.util.warningDisplay("A robot task is already running.")
+            return
 
+        self.logic.stop_execution_flag = False
+        self.statusUpdateTimer.stop()  # Pause idle polling
+
+        # Store all necessary info for the task, including for stall detection
+        self._task_state = {
+            "mode": mode,
+            "start_time": time.time(),
+            "timeout": 120.0,
+            "target_steps": kwargs.get("target_steps"),
+            "keyframes": kwargs.get("keyframes"),
+            "keyframe_index": 0,
+            "last_command_time": 0,
+            "last_encoder_pos": None,
+            "stall_start_time": 0,
+        }
+        
+        now = time.time()
+        # Send the initial command to the robot
+        if mode == "trajectory":
+            # For a trajectory, the first target is the first keyframe
+            target_steps = self.logic._convert_angles_to_steps_array(self._task_state["keyframes"][0])
+            self._task_state["target_steps"] = target_steps
+            self.logic.send_target_pose_commands(target_steps)
+            self._task_state["last_command_time"] = now
+            self._task_state["stall_start_time"] = now
+        else: # For all other modes (move, jog, home)
+            self.logic.send_target_pose_commands(self._task_state["target_steps"])
+            self._task_state["last_command_time"] = now
+            self._task_state["stall_start_time"] = now
+        
+        self.robotTaskTimer.start()
+        self._checkAllButtons()
+        
+    def _onRobotTaskStep(self):
+        """Called by the QTimer to run one step of the movement logic with stall detection."""
+        # 1. Check for stop conditions
+        if self.logic.stop_execution_flag:
+            logging.info("Stop flag detected. Halting task.")
+            self.logic.send_stop_commands() # Send hardware stop
+            self._stopRobotTask(success=False, message="Stopped by user.")
+            return
+
+        if time.time() - self._task_state["start_time"] > self._task_state["timeout"]:
+            logging.error("Task timed out.")
+            self.logic.send_stop_commands()
+            self._stopRobotTask(success=False, message="Task timed out.")
+            return
+
+        # 2. Get current state from both encoder and motor controller
+        live_encoder_pos = None
+        if self.logic and self.logic.is_encoder_connected():
+            with self.logic.encoder_data_lock:
+                live_encoder_pos = self.logic.true_encoder_position
+        
+        live_mc_pos = self.logic.get_current_positions()
+
+        if not live_encoder_pos:
+            return # The encoder is our primary source of truth for control
+
+        # --- UPDATE 3D MODEL & UI ---
+        # The 3D model follows the encoder, which is the source of truth
+        live_pose_rad = self.logic._convert_steps_array_to_angles(np.array(live_encoder_pos))
+        self.logic.setRobotPose(live_pose_rad)
+        
+        # Pass the live motor controller data to the display function for the table
+        self.updateStatusDisplay(live_mc_pos)
+        
+        current_steps = np.array(live_encoder_pos)
+        target_steps = self._task_state["target_steps"]
+        last_pos = self._task_state.get("last_encoder_pos")
+        now = time.time()
+
+        # 3. Check for arrival at current target
+        arrival_tolerance = 0
+        if np.all(np.abs(current_steps - target_steps) <= arrival_tolerance):
+            if self._task_state["mode"] == "trajectory":
+                self._task_state["keyframe_index"] += 1
+                if self._task_state["keyframe_index"] < len(self._task_state["keyframes"]):
+                    logging.info(f"Reached keyframe {self._task_state['keyframe_index']}. Moving to next.")
+                    next_target = self.logic._convert_angles_to_steps_array(self._task_state["keyframes"][self._task_state["keyframe_index"]])
+                    self._task_state["target_steps"] = next_target
+                    self.logic.send_target_pose_commands(next_target)
+                    self._task_state["last_command_time"] = now
+                    self._task_state["stall_start_time"] = now # Reset stall timer for new keyframe
+                else:
+                    self._stopRobotTask(success=True, message="Trajectory executed successfully.")
+            else:
+                self._stopRobotTask(success=True, message=f"Task '{self._task_state['mode']}' finished.")
+            return
+
+        # 4. If not at target, perform stall detection
+        is_moving = last_pos is None or not np.array_equal(current_steps, last_pos)
+
+        if is_moving:
+            # Robot is making progress, so just update its last known position and reset the stall timer.
+            self._task_state["last_encoder_pos"] = current_steps
+            self._task_state["stall_start_time"] = now
+        else:
+            # Robot is not moving. Check if it has been stalled for long enough.
+            STALL_THRESHOLD_SEC = 0.5 # Consider stalled if no movement for 500ms
+            if now - self._task_state.get("stall_start_time", 0) > STALL_THRESHOLD_SEC:
+                # To prevent flooding, only re-issue the command periodically
+                if now - self._task_state.get("last_command_time", 0) > 1.0:
+                    
+                    # If the controller is out of sync, its internal position might
+                    # match the target, causing it to ignore the move command.
+                    # We must correct its internal state first.
+                    is_desynced = live_mc_pos is not None and np.any(np.array(live_mc_pos[:self.num_joints]) != current_steps)
+                    
+                    if is_desynced:
+                        logging.warning(f"Stall with desync detected. Encoder: {current_steps}, Controller: {live_mc_pos}. Forcing sync.")
+                        self.logic.sync_controller_position(current_steps.tolist())
+
+                    logging.info(f"Robot stalled. (Encoder: {current_steps}, Target: {target_steps}). Re-issuing move command.")
+                    self.logic.send_target_pose_commands(target_steps)
+                    self._task_state["last_command_time"] = now
+                       
+    def _stopRobotTask(self, success=False, message=""):
+        """Stops the timer and cleans up the task state."""
+        self.robotTaskTimer.stop()
+        logging.info(message)
+        
+        self.logic.robot_state = self.logic.STATE_IDLE
+        self._task_state = {}
+        # self.logicTargetSteps = None # This line is now removed
+
+        if self.logic.is_motor_controller_connected():
+            self.statusUpdateTimer.start() # Resume idle polling
+        
+        self.updateStatusDisplay()
+        self._checkAllButtons()
+        
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
         uiWidget = slicer.util.loadUI(self.resourcePath("UI/Mamri.ui"))
@@ -108,6 +251,7 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.drawDebugMarkersCheckBox.connect("toggled(bool)", self.onDrawDebugMarkersCheckBoxToggled)
         self.ui.trajectorySlider.valueChanged.connect(self.onTrajectorySliderChanged)
         self.ui.playPauseButton.clicked.connect(self.onPlayPauseButton)
+        self.ui.zeroHardwareButton.clicked.connect(self.onZeroHardwareButton)
 
         # --- Connections for Motor Controller Control ---
         self.ui.moveToPoseButton.clicked.connect(self.onMoveToPoseButton)
@@ -127,20 +271,24 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._animationTimer.setInterval(50)
         self._animationTimer.timeout.connect(self.doAnimationStep)
         
-        # --- Motor Controller Status Polling Timer Setup ---
-        self.statusUpdateTimer.setInterval(500) # Poll every 500 ms
+        # --- Status Polling Timer Setup ---
+        self.statusUpdateTimer.setInterval(40) 
         self.statusUpdateTimer.timeout.connect(self.updateStatusDisplay)
 
 
         uiWidget.setMRMLScene(slicer.mrmlScene)
 
         self.logic = MamriLogic()
+        self.num_joints = self.logic.num_joints
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
         
+        # Refresh ports on setup to handle module reloads
+        self.onRefreshPortsButton()
+        
         self._setupUIComponents()
         self.initializeParameterNode()
-
+        
     def cleanup(self) -> None: 
         self.removeObservers()
         self._removeTargetFiducialObservers()
@@ -148,18 +296,38 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._animationTimer.stop()
         if self.statusUpdateTimer:
             self.statusUpdateTimer.stop()
-        if self.logic:
-            self.logic.stop_trajectory_execution() 
-            self.logic.disconnect_from_motor_controller() # Renamed
-            self.logic.disconnect_from_encoder() # New
 
-    def enter(self) -> None: 
+        # Stop any running robot task before disconnecting
+        if hasattr(self, "robotTaskTimer") and self.robotTaskTimer.isActive():
+            self.robotTaskTimer.stop()  # Immediately stop the timer loop
+            if self.logic:
+                self.logic.send_stop_commands()  # Tell the hardware to stop moving
+            self._task_state = {}  # Reset the task state
+            logging.info("Robot task stopped during module cleanup.")
+
+        if self.logic:
+            self.logic.disconnect_from_motor_controller()
+            self.logic.disconnect_from_encoder()
+            
+    def _updatePollingTimerState(self):
+        """Starts or stops the statusUpdateTimer based on hardware connections."""
+        is_mc_connected = self.logic and self.logic.is_motor_controller_connected()
+        is_encoder_connected = self.logic and self.logic.is_encoder_connected()
+
+        if is_mc_connected or is_encoder_connected:
+            if not self.statusUpdateTimer.isActive():
+                self.statusUpdateTimer.start()
+        else:
+            if self.statusUpdateTimer.isActive():
+                self.statusUpdateTimer.stop()
+    
+    def enter(self) -> None:
         self.initializeParameterNode()
-        self.onRefreshPortsButton() # For Motor Controller
+        self.onRefreshPortsButton()
         # Initial UI state update
         self.updateStatusDisplay()
         self._checkAllButtons()
-
+        
     def exit(self) -> None:
         self.remove_parameter_node_observers()
 
@@ -206,6 +374,27 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self._checkAllButtons()
 
+    def _on_robot_task_finished(self):
+        """Cleans up after the robot worker thread is finished."""
+        logging.info("Robot task finished.")
+        if self.robotThread:
+            self.robotThread.quit()
+            self.robotThread.wait()
+            self.robotThread = None
+            self.robotWorker = None
+
+        self.logicTargetSteps = None
+        # Resume polling if still connected
+        if self.logic and self.logic.is_motor_controller_connected():
+            self.statusUpdateTimer.start()
+        self.updateStatusDisplay()
+        self._checkAllButtons()
+
+    def _on_robot_task_error(self, error_message):
+        """Handles errors reported by the robot worker."""
+        slicer.util.errorDisplay(f"An error occurred in the robot task: {error_message}")
+        self._on_robot_task_finished()  # Perform the same cleanup on error
+    
     def _checkAllButtons(self, caller=None, event=None) -> None:
         can_apply = self._parameterNode and self._parameterNode.inputVolume is not None
         if hasattr(self.ui, "applyButton"):
@@ -231,12 +420,13 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self.ui, "playPauseButton"):
             self.ui.playPauseButton.enabled = trajectory_is_planned
         if hasattr(self.ui, "trajectoryStatusLabel"):
-            if not self._isExecuting and self.trajectoryPath is None:
+            is_executing_check = self.robotTaskTimer.isActive()
+            if not is_executing_check and self.trajectoryPath is None:
                 self.ui.trajectoryStatusLabel.text = "(No trajectory planned)"
 
-        is_mc_connected = self.logic and self.logic.is_motor_controller_connected() # Renamed
-        is_encoder_connected = self.logic and self.logic.is_encoder_connected() # New
-        is_executing = self._isExecuting
+        is_mc_connected = self.logic and self.logic.is_motor_controller_connected()
+        is_encoder_connected = self.logic and self.logic.is_encoder_connected()
+        is_executing = self.robotTaskTimer.isActive()
 
         # --- Logic for Motor Controller Control Buttons ---
         if hasattr(self.ui, "connectButton"):
@@ -257,7 +447,13 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # --- Logic for Encoder Control Buttons ---
         if hasattr(self.ui, "connectEncoderButton"):
             self.ui.connectEncoderButton.enabled = not is_executing
-
+        
+        # --- Logic for new Zero Hardware Button ---
+        if hasattr(self.ui, "zeroHardwareButton"):
+            can_zero_hw = is_mc_connected and is_encoder_connected and not is_executing
+            self.ui.zeroHardwareButton.enabled = can_zero_hw
+            self.ui.zeroHardwareButton.toolTip = "Zero the encoder and motor controller hardware." if can_zero_hw else "Connect both encoder and motor controller to enable."
+            
     def onApplyButton(self) -> None:
         if not self._parameterNode:
             slicer.util.errorDisplay("Parameter node is not initialized.")
@@ -450,36 +646,15 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.logic:
             self.logic.zeroRobot()
     
-    def onMoveToPoseButton(self):
-        if self._isExecuting:
-            slicer.util.warningDisplay("An action is already being executed.")
+    def onZeroHardwareButton(self):
+        """Handles click of the 'Zero Hardware Pose' button."""
+        if self.robotTaskTimer.isActive():
+            slicer.util.errorDisplay("Cannot zero hardware while a task is running.")
             return
-        if self.lastEstimatedPoseSteps is None:
-            slicer.util.errorDisplay("No pose has been estimated yet.")
-            return
-
-        self._isExecuting = True
-        # Set the estimated pose as the current target for the UI table
-        self.logicTargetSteps = self.lastEstimatedPoseSteps
-        self._checkAllButtons()
-        self.statusUpdateTimer.stop() # Pause polling during blocking call
-        try:
-            self.logic.move_to_specific_pose(
-                target_pose_steps=self.lastEstimatedPoseSteps,
-                status_callback=self.updateStatusDisplay
-            )
-        except Exception as e:
-            slicer.util.errorDisplay(f"An unexpected error occurred during movement: {e}")
-            logging.error(f"An unexpected error occurred during movement: {e}", exc_info=True)
-        finally:
-            self._isExecuting = False
-            self.logic.stop_execution_flag = False
-            self.logicTargetSteps = None # Clear the target after the action
-            self.updateStatusDisplay() # Final update
-            if self.logic.is_motor_controller_connected():
-                self.statusUpdateTimer.start()
-            self._checkAllButtons()
-        
+        if self.logic:
+            self.logic.zero_hardware_pose()
+            self.updateStatusDisplay()
+    
     def onRefreshPortsButton(self):
         """Refreshes the list of available serial ports for both dropdowns."""
         ports = self.logic.get_available_serial_ports()
@@ -510,8 +685,10 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.logic.disconnect_from_encoder()
             self.ui.encoderConnectionStatusLabel.text = "Status: Not Connected"
             self.ui.connectEncoderButton.text = "Connect"
+        
+        self._updatePollingTimerState()
+        self.updateStatusDisplay()
         self._checkAllButtons()
-        self.updateStatusDisplay() # Update display for encoder connection status
 
     def onConnectButtonToggled(self, checked):
         port = self.ui.serialPortComboBox.currentText
@@ -520,79 +697,18 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if self.logic.connect_to_motor_controller(port): # Renamed
                 self.ui.connectionStatusLabel.text = f"Status: Connected to {port}"
                 self.ui.connectButton.text = "Disconnect"
-                self.statusUpdateTimer.start()
             else:
                 self.ui.connectionStatusLabel.text = f"Status: Failed to connect"
                 self.ui.connectButton.setChecked(False)
         else:
-            self.statusUpdateTimer.stop()
             self.logic.disconnect_from_motor_controller() # Renamed
             self.ui.connectionStatusLabel.text = "Status: Not Connected"
             self.ui.connectButton.text = "Connect"
         
+        self._updatePollingTimerState()
         self.updateStatusDisplay()
         self._checkAllButtons()
-
-    def onExecuteTrajectoryButton(self):
-        if self._isExecuting:
-            slicer.util.warningDisplay("A trajectory is already being executed.")
-            return
-
-        if not self.trajectoryKeyframes:
-            slicer.util.errorDisplay("Please plan a path first.")
-            return
-
-        self._isExecuting = True
-        self._checkAllButtons()
-        self.statusUpdateTimer.stop() # Pause polling during blocking call
-
-        try:
-            self.logic.execute_trajectory_on_robot(
-                self.trajectoryKeyframes,
-                status_callback=self.updateStatusDisplay
-            )
-        except Exception as e:
-            slicer.util.errorDisplay(f"An unexpected error occurred during execution: {e}")
-            logging.error(f"An unexpected error occurred during execution: {e}", exc_info=True)
-        finally:
-            self._isExecuting = False
-            self.logic.stop_execution_flag = False
-            self.logicTargetSteps = None # Clear the target after the action
-            self.updateStatusDisplay() # Final update
-            if self.logic.is_motor_controller_connected():
-                self.statusUpdateTimer.start()
-            self._checkAllButtons()
-
-    def onReturnToZeroButton(self):
-        if self._isExecuting:
-            slicer.util.warningDisplay("An action is already being executed.")
-            return
-
-        self._isExecuting = True
-        # Set zero as the current target for the UI table
-        self.logicTargetSteps = np.zeros(self.num_joints, dtype=int)
-        self._checkAllButtons()
-        self.statusUpdateTimer.stop() # Pause polling during blocking call
-
-        try:
-            self.logic.return_to_zero_position(
-                status_callback=self.updateStatusDisplay
-            )
-        except Exception as e:
-            slicer.util.errorDisplay(f"An unexpected error occurred during homing: {e}")
-            logging.error(f"An unexpected error occurred during homing: {e}", exc_info=True)
-        finally:
-            self._isExecuting = False
-            self.logic.stop_execution_flag = False
-            self.logicTargetSteps = None # Clear the target after the action
-            self.updateStatusDisplay() # Final update
-            if self.logic.is_motor_controller_connected():
-                self.statusUpdateTimer.start()
-            self._checkAllButtons()
-
-    def onStopTrajectoryButton(self):
-        self.logic.stop_trajectory_execution()
-
+    
     def _setupUIComponents(self):
         """Initializes the UI components like tables and combo boxes."""
         if not hasattr(self.ui, "jointStatusTableWidget"):
@@ -631,109 +747,145 @@ class MamriWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         configure_table(self.ui.trajectoryEndPoseTable, ["End Pose", "Steps", "Degrees (°)"], joint_names)
     
     def updateStatusDisplay(self, live_mc_pose_steps=None):
-        """Refreshes all status displays in the UI, now including live encoder data."""
-        # --- Get Encoder Data (Source of Truth) ---
-        live_encoder_steps = None
-        if self.logic:
-            with self.logic.encoder_data_lock:
-                # Make a copy to avoid holding the lock for too long
-                live_encoder_steps = list(self.logic.true_encoder_position)
-
-        # --- Get Motor Controller Data ---
-        if live_mc_pose_steps is None:
-            if self.logic and self.logic.is_motor_controller_connected() and not self._isExecuting:
-                all_positions = self.logic.get_current_positions()
-                if all_positions:
-                    live_mc_pose_steps = np.array(all_positions[:self.num_joints])
-            else:
-                live_mc_pose_steps = None
-        
-        # --- Update TCP and IK error based on the most reliable position data available ---
-        pose_for_tcp_calc = live_encoder_steps if live_encoder_steps and any(live_encoder_steps) else live_mc_pose_steps
-        ik_error_text, tcp_x, tcp_y, tcp_z = "n/a", "---", "---", "---"
-        if self.logic and self.logic.last_ik_error is not None:
-            ik_error_text = f"{self.logic.last_ik_error:.4f} mm"
-
-        if pose_for_tcp_calc is not None and self.logic:
-            if base_node := self.logic.jointTransformNodes.get("Baseplate"):
-                base_transform_vtk = vtk.vtkMatrix4x4()
-                base_node.GetMatrixTransformToWorld(base_transform_vtk)
-                pose_rad = self.logic._convert_steps_array_to_angles(np.array(pose_for_tcp_calc))
-                joint_values_rad = dict(zip(self.logic.articulated_chain, pose_rad))
-                tcp_transform = self.logic._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform_vtk)
-                if tcp_transform:
-                    tcp_x, tcp_y, tcp_z = f"{tcp_transform.GetElement(0, 3):.2f}", f"{tcp_transform.GetElement(1, 3):.2f}", f"{tcp_transform.GetElement(2, 3):.2f}"
-            else:
-                tcp_x, tcp_y, tcp_z = "Run Pose", "Estimation", "First"
-
-        self.ui.ikErrorLabel.text = ik_error_text
-        self.ui.tcpXLabel.text = tcp_x
-        self.ui.tcpYLabel.text = tcp_y
-        self.ui.tcpZLabel.text = tcp_z
-
-        # --- Populate the Status Table ---
+        """Refreshes all status displays in the UI with throttling for heavy tasks."""
         table = self.ui.jointStatusTableWidget
-        for i in range(self.num_joints):
-            # Column 1: Encoder Steps
-            if live_encoder_steps is not None:
+        now = time.time()
+        is_executing = self.robotTaskTimer.isActive()
+
+        # --- FAST UPDATES (Every 40ms) ---
+        # Get and display the latest encoder data on every timer tick.
+        if self.logic and self.logic.is_encoder_connected():
+            with self.logic.encoder_data_lock:
+                live_encoder_steps = list(self.logic.true_encoder_position)
+            for i in range(self.num_joints):
                 enc_item = qt.QTableWidgetItem(f"{live_encoder_steps[i]: >5}")
-            else:
-                enc_item = qt.QTableWidgetItem("---")
-            
-            # Column 2: Controller Steps
-            if live_mc_pose_steps is not None:
-                mc_item = qt.QTableWidgetItem(f"{live_mc_pose_steps[i]: >5}")
-            else:
-                mc_item = qt.QTableWidgetItem("---")
+                enc_item.setFlags(enc_item.flags() & ~qt.Qt.ItemIsEditable)
+                enc_item.setTextAlignment(qt.Qt.AlignCenter)
+                table.setItem(i, 1, enc_item)
 
-            # Column 3: Target Steps
-            if self.logicTargetSteps is not None and i < len(self.logicTargetSteps):
-                target_steps = int(self.logicTargetSteps[i])
-                target_item = qt.QTableWidgetItem(f"{target_steps: >5}")
-            else:
-                target_item = qt.QTableWidgetItem("---")
+        # --- SLOW / THROTTLED UPDATES (Approx. 4 times per second) ---
+        if now - self._last_heavy_update_time > 0.25:
+            self._last_heavy_update_time = now
             
-            for col, item in enumerate([enc_item, mc_item, target_item], 1):
-                item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
-                item.setTextAlignment(qt.Qt.AlignCenter)
-                table.setItem(i, col, item)
+            # 1. Get Motor Controller Data
+            if live_mc_pose_steps is None and not is_executing:
+                if self.logic and self.logic.is_motor_controller_connected():
+                    live_mc_pose_steps = self.logic.get_current_positions()
+            
+            # 2. Update TCP and IK error
+            pose_for_tcp_calc = live_mc_pose_steps # Use MC position for TCP calculation
+            ik_error_text, tcp_x, tcp_y, tcp_z = "n/a", "---", "---", "---"
+            if self.logic and self.logic.last_ik_error is not None:
+                ik_error_text = f"{self.logic.last_ik_error:.4f} mm"
 
-        if self._isExecuting:
+            if pose_for_tcp_calc is not None and self.logic:
+                if base_node := self.logic.jointTransformNodes.get("Baseplate"):
+                    base_transform_vtk = vtk.vtkMatrix4x4()
+                    base_node.GetMatrixTransformToWorld(base_transform_vtk)
+                    pose_rad = self.logic._convert_steps_array_to_angles(np.array(pose_for_tcp_calc))
+                    joint_values_rad = dict(zip(self.logic.articulated_chain, pose_rad))
+                    tcp_transform = self.logic._get_world_transform_for_joint(joint_values_rad, "Needle", base_transform_vtk)
+                    if tcp_transform:
+                        tcp_x, tcp_y, tcp_z = f"{tcp_transform.GetElement(0, 3):.2f}", f"{tcp_transform.GetElement(1, 3):.2f}", f"{tcp_transform.GetElement(2, 3):.2f}"
+                else:
+                    tcp_x, tcp_y, tcp_z = "Run Pose", "Estimation", "First"
+            
+            self.ui.ikErrorLabel.text = ik_error_text
+            self.ui.tcpXLabel.text = tcp_x
+            self.ui.tcpYLabel.text = tcp_y
+            self.ui.tcpZLabel.text = tcp_z
+            
+            # 3. Update the rest of the status table (Controller and Target columns)
+            for i in range(self.num_joints):
+                # Controller Steps
+                if live_mc_pose_steps is not None:
+                    mc_item = qt.QTableWidgetItem(f"{live_mc_pose_steps[i]: >5}")
+                else:
+                    mc_item = qt.QTableWidgetItem("---")
+                
+                # Target Steps
+                target_steps_for_ui = self._task_state.get("target_steps") if is_executing else self.logicTargetSteps
+                if target_steps_for_ui is not None and i < len(target_steps_for_ui):
+                    target_item = qt.QTableWidgetItem(f"{int(target_steps_for_ui[i]): >5}")
+                else:
+                    target_item = qt.QTableWidgetItem("---")
+                
+                for col, item in enumerate([mc_item, target_item], 2):
+                    item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
+                    item.setTextAlignment(qt.Qt.AlignCenter)
+                    table.setItem(i, col, item)
+
+        # Update execution status label (can be done on fast tick)
+        if is_executing:
             self.ui.trajectoryStatusLabel.text = "Executing... (See status table)"
         elif self.trajectoryPath is None:
             self.ui.trajectoryStatusLabel.text = "(No trajectory planned)"
         
         slicer.app.processEvents()
-    
-    def onJogClicked(self, is_positive: bool):
-        """Handles clicks for both jog buttons, now sending integer steps to the logic layer."""
-        if self._isExecuting or not self.logic.is_motor_controller_connected():
-            slicer.util.warningDisplay("Cannot jog robot while another action is running or disconnected.")
+        
+    def onMoveToPoseButton(self):
+        if self.robotTaskTimer.isActive():
+            slicer.util.warningDisplay("An action is already being executed.")
+            return
+        if self.lastEstimatedPoseSteps is None:
+            slicer.util.errorDisplay("No pose has been estimated yet.")
             return
 
-        self._isExecuting = True
-        self._checkAllButtons()
-        self.statusUpdateTimer.stop()
-
-        try:
-            joint_index = self.ui.jogJointComboBox.currentIndex
-            # Read the value as an integer number of steps
-            steps_to_move = int(self.ui.jogStepSpinBox.value)
-            
-            if not is_positive:
-                steps_to_move *= -1
-
-            # Call the logic function, now passing steps directly
-            self.logic.jog_joint(joint_index, steps_to_move, self.updateStatusDisplay)
-
-        finally:
-            self._isExecuting = False
-            self.logicTargetSteps = None
-            self.updateStatusDisplay()
-            if self.logic.is_motor_controller_connected():
-                self.statusUpdateTimer.start()
-            self._checkAllButtons()
+        self.logicTargetSteps = self.lastEstimatedPoseSteps
+        self.updateStatusDisplay()
+        self._startRobotTask(mode="move_to_pose", target_steps=self.lastEstimatedPoseSteps)
               
+    def onExecuteTrajectoryButton(self):
+        if self.robotTaskTimer.isActive():
+            slicer.util.warningDisplay("A trajectory is already being executed.")
+            return
+        if not self.trajectoryKeyframes:
+            slicer.util.errorDisplay("Please plan a path first.")
+            return
+
+        self.logicTargetSteps = self.logic._convert_angles_to_steps_array(self.trajectoryKeyframes[-1])
+        self.updateStatusDisplay()
+        self._startRobotTask(mode="trajectory", keyframes=self.trajectoryKeyframes)
+            
+    def onReturnToZeroButton(self):
+        if self.robotTaskTimer.isActive():
+            slicer.util.warningDisplay("An action is already being executed.")
+            return
+
+        self.logicTargetSteps = np.zeros(self.num_joints, dtype=int)
+        self.updateStatusDisplay()
+        self._startRobotTask(mode="homing", target_steps=self.logicTargetSteps)
+            
+    def onStopTrajectoryButton(self):
+        if not self.robotTaskTimer.isActive():
+            return
+        # Set the flag; the running task will detect it and stop.
+        self.logic.stop_execution_flag = True
+        
+    def onJogClicked(self, is_positive: bool):
+        if self.robotTaskTimer.isActive():
+            slicer.util.warningDisplay("Cannot jog robot while another action is running.")
+            return
+            
+        # For jogging, we calculate the target steps first
+        current_pos = self.logic.get_current_positions()
+        if not current_pos:
+            slicer.util.errorDisplay("Could not get robot's current position to execute jog.")
+            return
+        
+        target_steps = np.array(current_pos[:self.num_joints])
+        joint_index = self.ui.jogJointComboBox.currentIndex
+        steps_to_move = int(self.ui.jogStepSpinBox.value)
+        
+        if not is_positive:
+            steps_to_move *= -1
+        
+        target_steps[joint_index] += steps_to_move
+        
+        self.logicTargetSteps = target_steps
+        self.updateStatusDisplay()
+        self._startRobotTask(mode="jog", target_steps=target_steps)
+        
     def _onParameterNodeModified(self, caller, event) -> None:
         """This function is called when any property in the parameter node is changed."""
         # Check if the target fiducial node itself has been changed
@@ -816,9 +968,9 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.jointCollisionPolys: Dict[str, vtk.vtkPolyData] = {}
 
         self.INTENSITY_THRESHOLD = 65.0
-        self.MIN_VOLUME_THRESHOLD = 175.0
+        self.MIN_VOLUME_THRESHOLD = 50.0
         self.MAX_VOLUME_THRESHOLD = 1500.0
-        self.DISTANCE_TOLERANCE = 3.0
+        self.DISTANCE_TOLERANCE = 5.0
 
         self.models_visible = True
         self.markers_visible = True
@@ -827,6 +979,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.robot_definition = self._load_robot_definition()
         self.robot_definition_dict = {joint["name"]: joint for joint in self.robot_definition}
         self.articulated_chain = ["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Joint6"]
+        self.num_joints = len(self.articulated_chain)
         
         self.SAVED_BASEPLATE_TRANSFORM_NODE_NAME = "MamriSavedBaseplateTransform"
         self.TARGET_POSE_TRANSFORM_NODE_NAME = "MamriTargetPoseTransform_DEBUG"
@@ -848,13 +1001,14 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         self.STATE_IDLE = 0
         self.STATE_MOVING = 1
         self.robot_state = self.STATE_IDLE
-        self.DISCREPANCY_THRESHOLD = 5 # Steps
+        self.DISCREPANCY_THRESHOLD = 0 # Set to 0 for maximum precision
         self.sync_timer = qt.QTimer()
         self.sync_timer.setInterval(250) # Check every 250ms
         self.sync_timer.timeout.connect(self._perform_sync_check)
         
         self.stop_execution_flag = False
         self.last_ik_error = None
+        self.last_known_mc_position = None
 
         self._discover_robot_nodes_in_scene()
         
@@ -884,6 +1038,21 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 # Construct S command with all 8 values, using encoder data for the first 6
                 command_payload = ",".join(map(str, encoder_pos)) + ",0,0" 
                 self.send_command_to_robot(f"S{command_payload}")
+    
+    def sync_controller_position(self, true_position_steps: List[int]):
+        """
+        Sends the 'S' command to force the motor controller's internal step
+        count to match the provided 'true' position (from the encoders).
+        """
+        if not self.is_motor_controller_connected():
+            logging.warning("Cannot sync controller position: not connected.")
+            return
+
+        # The 'S' command requires all 8 values. We use the encoder for the first 6
+        # and assume 0 for the remaining two.
+        command_payload = ",".join(map(str, true_position_steps)) + ",0,0"
+        logging.info(f"Syncing controller position with command: S{command_payload}")
+        self.send_command_to_robot(f"S{command_payload}")
     
     def setRobotPose(self, joint_angles_rad: np.ndarray):
         """
@@ -970,7 +1139,10 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return path, keyframes, collision_detected
         
     def get_current_positions(self) -> Optional[List[int]]:
-        """Sends 'P' to the robot and returns the current positions of all joints."""
+        """
+        Sends 'P' to the robot and returns the current positions for the
+        relevant joints (first 6 values).
+        """
         if not self.is_motor_controller_connected():
             return None
         try:
@@ -980,64 +1152,12 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 return None
 
             positions = [int(p.strip()) for p in response.split(',')]
-            return positions
+            # The controller returns 8 values, but we only use the first num_joints.
+            return positions[:self.num_joints]
         except Exception as e:
             logging.warning(f"Could not get robot position. Error: {e}")
             return None
-
-    def execute_trajectory_on_robot(self, keyframes: List[np.ndarray], status_callback=None):
-        """
-        Executes a trajectory by moving the robot to each keyframe pose sequentially.
-        This function is BLOCKING and uses the generic `move_to_specific_pose` function.
-        """
-        if not self.is_motor_controller_connected():
-            logging.error("Execution failed: Robot not connected.")
-            if status_callback: status_callback()
-            return
-
-        self.stop_execution_flag = False
-
-        initial_robot_positions = self.get_current_positions()
-        if initial_robot_positions is None:
-            logging.error("Aborting execution: Failed to get initial robot position.")
-            if status_callback: status_callback()
-            return
-
-        num_joints = len(self.articulated_chain)
-        actual_start_steps = np.array(initial_robot_positions[:num_joints])
-        planned_steps = [self._convert_angles_to_steps_array(pose) for pose in keyframes]
-
-        # Create a path that starts from the robot's actual current position
-        full_path_steps = [actual_start_steps] + planned_steps
-
-        # Remove consecutive duplicate steps to prevent unnecessary moves
-        unique_path_steps = []
-        for step_array in full_path_steps:
-            if not unique_path_steps or not np.array_equal(unique_path_steps[-1], np.round(step_array)):
-                unique_path_steps.append(np.round(step_array).astype(int))
-
-        if len(unique_path_steps) < 2:
-            if status_callback: status_callback(actual_start_steps)
-            logging.info("Robot is already at the target position.")
-            return
-
-        for i, target_pose_steps in enumerate(unique_path_steps[1:]):
-            if self.stop_execution_flag:
-                logging.info("Execution stopped by user.")
-                break
-
-            success = self.move_to_specific_pose(
-                target_pose_steps,
-                status_callback,
-                mode=f"Keyframe {i+1}/{len(unique_path_steps)-1}"
-            )
-
-            if not success:
-                logging.error(f"Failed to reach keyframe {i+1}. Aborting trajectory.")
-                break
-
-        logging.info("Trajectory execution finished.")
-
+        
     def _convert_angles_to_steps_array(self, joint_angles_rad: np.ndarray) -> np.ndarray:
         """Converts an array of joint angles (radians) into an array of motor steps."""
         steps_array = np.zeros(len(joint_angles_rad), dtype=int)
@@ -1194,36 +1314,65 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return [port.device for port in ports]
 
     def connect_to_motor_controller(self, port: str) -> bool:
-        """Establishes a serial connection with the robot motor controller and starts the sync timer."""
+        """Establishes a serial connection with the robot motor controller and performs a handshake."""
         if self.is_motor_controller_connected():
             self.disconnect_from_motor_controller()
         try:
-            self.motor_controller_serial = serial.Serial(port, 115200, timeout=1, write_timeout=1)
-            logging.info(f"Successfully connected to motor controller on port {port}.")
-            self.sync_timer.start()
-            return True
+            self.motor_controller_serial = serial.Serial(port, 115200, timeout=0.05, write_timeout=2)
+            time.sleep(1.5) 
+            self.motor_controller_serial.flushInput()
+            self.motor_controller_serial.write(b'X\n')
+            response = self.motor_controller_serial.readline().decode('ascii').strip()
+            
+            
+            if "Hello world!" in response:
+                logging.info(f"Motor controller handshake successful on port {port}.")
+                self.sync_timer.start()
+                return True
+            else:
+                logging.error(f"Motor controller handshake failed on {port}. Expected 'Hello world!', got '{response}'. Is this the correct port?")
+                self.motor_controller_serial.close()
+                self.motor_controller_serial = None
+                return False
+
         except serial.SerialException as e:
             logging.error(f"Failed to connect to motor controller on port {port}: {e}")
+            if self.motor_controller_serial:
+                self.motor_controller_serial.close()
             self.motor_controller_serial = None
             return False
         
     def connect_to_encoder(self, port: str) -> bool:
-        """Establishes connection to the Encoder (Pico) and starts the listener thread."""
+        """Establishes connection to the Encoder, verifies the data stream, and starts the listener thread."""
         if self.is_encoder_connected():
             self.disconnect_from_encoder()
         try:
-            self.encoder_serial = serial.Serial(port, 115200, timeout=1)
-            self.stop_encoder_thread_flag.clear() # Clear the flag for a new thread
-            self.encoder_listener_thread = threading.Thread(target=self._encoder_listener_thread_func)
-            self.encoder_listener_thread.daemon = True # Allow program to exit even if thread is running
-            self.encoder_listener_thread.start()
-            logging.info(f"Successfully connected to Encoder on {port} and started listener thread.")
-            return True
-        except serial.SerialException as e:
+            self.encoder_serial = serial.Serial(port, 115200, timeout=2)
+            time.sleep(0.5) # Give the port a moment to start streaming
+
+            # Handshake: Read one line and check if it's valid encoder data
+            line = self.encoder_serial.readline().decode('ascii').strip()
+            parts = line.split(',')
+            if len(parts) == len(self.articulated_chain) and all(p.strip().lstrip('-').isdigit() for p in parts):
+                logging.info(f"Encoder handshake successful on {port}. Received valid data: '{line}'")
+                self.stop_encoder_thread_flag.clear()
+                self.encoder_listener_thread = threading.Thread(target=self._encoder_listener_thread_func)
+                self.encoder_listener_thread.daemon = True
+                self.encoder_listener_thread.start()
+                return True
+            else:
+                logging.error(f"Encoder handshake failed on {port}. Expected 6 comma-separated integers, got '{line}'. Is this the correct port?")
+                self.encoder_serial.close()
+                self.encoder_serial = None
+                return False
+
+        except (serial.SerialException, UnicodeDecodeError, ValueError) as e:
             logging.error(f"Failed to connect to Encoder on port {port}: {e}")
+            if self.encoder_serial:
+                self.encoder_serial.close()
             self.encoder_serial = None
             return False
-
+        
     def disconnect_from_encoder(self) -> None:
         """Stops the listener thread and closes the Encoder serial connection."""
         if self.encoder_listener_thread and self.encoder_listener_thread.is_alive():
@@ -1245,28 +1394,37 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         return self.encoder_serial is not None and self.encoder_serial.is_open
 
     def _encoder_listener_thread_func(self):
-        """Function that runs in a background thread to continuously read Encoder data."""
+        """
+        Function that runs in a background thread to continuously read Encoder data.
+        This version is more robust and handles incomplete/malformed serial data
+        without crashing the thread.
+        """
         logging.info("Encoder listener thread started.")
         while not self.stop_encoder_thread_flag.is_set():
             try:
-                if self.encoder_serial.in_waiting > 0: # Only read if data is available
-                    line = self.encoder_serial.readline().decode('ascii').strip()
-                    if line:
-                        parts = line.split(',')
-                        if len(parts) == len(self.articulated_chain):
-                            new_pos = [int(p) for p in parts]
-                            with self.encoder_data_lock: # Protect shared data
+                if self.encoder_serial and self.encoder_serial.in_waiting > 0:
+                    # Read all available bytes to clear the buffer of old data
+                    data = self.encoder_serial.read(self.encoder_serial.in_waiting).decode('ascii')
+                    
+                    # Process only the last complete, non-empty line
+                    lines = data.strip().split('\n')
+                    if lines and lines[-1]:
+                        last_line = lines[-1]
+                        parts = last_line.split(',')
+                        if len(parts) == self.num_joints:
+                            # Safely convert to integers
+                            new_pos = [int(p.strip()) for p in parts]
+                            with self.encoder_data_lock:
                                 self.true_encoder_position = new_pos
-                        else:
-                            logging.debug(f"Encoder: Malformed data line received: '{line}'")
-            except (serial.SerialException, UnicodeDecodeError, ValueError) as e:
+            except (serial.SerialException, UnicodeDecodeError):
                 if not self.stop_encoder_thread_flag.is_set():
-                    logging.error(f"Encoder listener thread error: {e}")
-                # This exception could happen if the port is closed externally
-                break # Exit thread on serious error
-            time.sleep(0.01) # Prevent busy-waiting, give CPU a break
+                    logging.error("Encoder listener thread error.", exc_info=True)
+                break 
+            except ValueError:
+                pass
+            time.sleep(0.02)  # Check for new data every 20ms (50 Hz)
         logging.info("Encoder listener thread stopped.")
-
+        
     def disconnect_from_motor_controller(self) -> None:
         """Closes the serial connection to the motor controller and stops the sync timer."""
         self.sync_timer.stop()
@@ -1274,14 +1432,12 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             self.motor_controller_serial.close()
             logging.info(f"Disconnected from motor controller serial port.")
         self.motor_controller_serial = None
-    
+        self.robot_state = self.STATE_IDLE # Ensure state is reset
+        
     def is_motor_controller_connected(self) -> bool:
-        """Checks if the serial connection to the motor controller is active."""
-        return self.motor_controller_serial is not None and self.motor_controller_serial.is_open
-
         """Checks if the serial connection to the robot is active."""
-        return self.serial_connection is not None and self.serial_connection.is_open
-
+        return self.motor_controller_serial is not None and self.motor_controller_serial.is_open
+    
     def send_command_to_robot(self, command: str) -> bool:
         """Sends a raw command string to the robot, terminated by a newline."""
         if not self.is_motor_controller_connected():
@@ -1296,6 +1452,36 @@ class MamriLogic(ScriptedLoadableModuleLogic):
             logging.error(f"Failed to send command '{command}': {e}")
             return False
 
+    def zero_hardware_pose(self):
+        """
+        Sends commands to zero both the encoder's internal count and the
+        motor controller's internal count. This is a critical calibration step.
+        """
+        logging.info("Attempting to zero hardware poses...")
+        
+        # 1. Check that both devices are connected
+        if not self.is_encoder_connected() or not self.is_motor_controller_connected():
+            slicer.util.errorDisplay("Both the Encoder and Motor Controller must be connected to zero the hardware.")
+            return
+
+        # 2. Zero the Encoder by sending 'R'
+        try:
+            logging.info("Sending 'R' to zero encoder.")
+            self.encoder_serial.write(b'R\n')
+        except Exception as e:
+            logging.error(f"Failed to send zero command to encoder: {e}")
+            slicer.util.errorDisplay(f"Failed to send zero command to encoder: {e}")
+            return # Stop if this fails
+
+        # 3. Zero the Motor Controller by sending the 'S' command
+        command = "S" + ",".join(["0"] * 8)
+        logging.info(f"Sending '{command}' to zero motor controller.")
+        if not self.send_command_to_robot(command):
+            slicer.util.errorDisplay("Failed to send zero command to motor controller.")
+            return
+
+        slicer.util.infoDisplay("Hardware zero commands sent successfully.")
+    
     def _convert_angles_to_steps_command(self, joint_angles_rad: np.ndarray) -> str:
         """Converts an array of joint angles into a robot command string."""
         command_string = ""
@@ -1320,41 +1506,7 @@ class MamriLogic(ScriptedLoadableModuleLogic):
         logging.warning("Could not generate a command from the provided joint angles.")
         return False
         
-    def stop_trajectory_execution(self):
-        """
-        Signals the trajectory execution loop to stop and sends the robot's
-        current position as its new setpoint to perform a controlled stop.
-        """
-        logging.info("STOP command received. Halting robot motion...")
-
-        # 1. Set the flag to stop any Python-side execution loops.
-        self.stop_execution_flag = True
-
-        # 2. Check for an active connection.
-        if not self.is_motor_controller_connected():
-            logging.warning("Cannot send stop command: Robot not connected.")
-            return
-
-        # 3. Get the robot's current position.
-        current_positions = self.get_current_positions()
-        if current_positions is None:
-            logging.error("Failed to get current position to send stop command. Motor may not stop.")
-            return
-
-        # 4. Send the current position of each joint back as its new target.
-        logging.info(f"Sending current positions {current_positions} as new setpoints to halt motion.")
-        for i, pos in enumerate(current_positions):
-            if i < len(self.articulated_chain):
-                joint_name = self.articulated_chain[i]
-                joint_def = self.robot_definition_dict.get(joint_name, {})
-                command_letter = joint_def.get("command_letter")
-
-                if command_letter:
-                    command = f"{command_letter}{pos}"
-                    self.send_command_to_robot(command)
-
-        logging.info("Halt commands sent.")
-
+    
     def getParameterNode(self) -> 'MamriParameterNode':
         return MamriParameterNode(super().getParameterNode())
 
@@ -1818,14 +1970,18 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 m = vtk.vtkMatrix4x4()
                 tf_node.GetMatrixTransformToParent(m)
                 transform = vtk.vtkTransform(); transform.SetMatrix(m)
+                # VTK's GetOrientation returns rotations in X, Y, Z order.
                 orientation_rad = [math.radians(a) for a in transform.GetOrientation()]
                 axis = self.robot_definition_dict[name].get("articulation_axis")
-                if axis == "IS": angle_rad = orientation_rad[2]
-                elif axis == "PA": angle_rad = orientation_rad[1]
-                elif axis == "LR": angle_rad = orientation_rad[0]
+                if axis == "IS":   # Corresponds to Z-axis rotation
+                    angle_rad = orientation_rad[2]
+                elif axis == "PA": # Corresponds to Y-axis rotation, which needs inversion
+                    angle_rad = -orientation_rad[1]
+                elif axis == "LR": # Corresponds to X-axis rotation
+                    angle_rad = orientation_rad[0]
             angles_rad.append(angle_rad)
         return angles_rad
-
+    
     def _visualize_all_joint_markers_from_fk(self):
         for joint_def in self.robot_definition:
             if joint_def.get("has_markers"): self._visualize_joint_local_markers_in_world(joint_def["name"])
@@ -1982,148 +2138,6 @@ class MamriLogic(ScriptedLoadableModuleLogic):
                 self._clear_node_by_name(f"DEBUG_COLLISION_{part_name}")
         logging.info("Cleanup complete.")
     
-    def return_to_zero_position(self, status_callback=None):
-        """
-        Commands the robot to move to the home position (all joints at 0 steps)
-        using the new robust movement logic.
-        """
-        target_pose_steps = np.zeros(len(self.articulated_chain), dtype=int)
-        self.move_to_specific_pose(target_pose_steps, status_callback, "Homing")
-    
-    def move_to_specific_pose(self, target_pose_steps: np.ndarray, status_callback=None, mode="Moving") -> bool:
-        """
-        Commands the robot to a target pose.
-        Operates in Closed-Loop (encoder) or Open-Loop (no encoder) mode.
-        """
-        if not self.is_motor_controller_connected():
-            logging.error("Execution failed: Motor controller not connected.")
-            if status_callback: status_callback()
-            return False
-
-        self.stop_execution_flag = False
-        num_joints = len(self.articulated_chain)
-
-        # --- MODE SELECTION ---
-        if self.is_encoder_connected():
-            # --- CLOSED-LOOP MODE (Command, Verify, Correct) ---
-            max_retries = 3
-            arrival_tolerance = 2 # Steps
-
-            for attempt in range(max_retries):
-                if self.stop_execution_flag:
-                    logging.info(f"Movement ({mode}) stopped by user.")
-                    self.robot_state = self.STATE_IDLE
-                    return False
-
-                logging.info(f"--- Closed-Loop {mode} (Attempt {attempt + 1}/{max_retries}): Target = {target_pose_steps.tolist()} ---")
-                
-                self.robot_state = self.STATE_MOVING
-                for idx in range(num_joints):
-                    joint_def = self.get_joint_definition(idx)
-                    command = f"{joint_def['command_letter']}{int(target_pose_steps[idx])}"
-                    self.send_command_to_robot(command)
-
-                timeout = 120.0
-                start_time = time.time()
-                controller_arrived = False
-                while time.time() - start_time < timeout:
-                    if self.stop_execution_flag: break
-                    live_mc_pos = self.get_current_positions()
-                    if live_mc_pos:
-                        if status_callback: status_callback(np.array(live_mc_pos[:num_joints]))
-                        if np.all(np.abs(np.array(live_mc_pos[:num_joints]) - target_pose_steps) <= arrival_tolerance):
-                            controller_arrived = True
-                            break
-                    time.sleep(0.1)
-
-                time.sleep(0.2) # Settling period
-                self.robot_state = self.STATE_IDLE
-                
-                with self.encoder_data_lock:
-                    final_encoder_pos = np.array(self.true_encoder_position)
-                
-                if status_callback: status_callback(self.get_current_positions())
-
-                if np.all(np.abs(final_encoder_pos - target_pose_steps) <= arrival_tolerance):
-                    logging.info(f"SUCCESS: Target reached for '{mode}'. Encoder confirms position.")
-                    return True
-                else:
-                    logging.warning(f"Target missed. Target: {target_pose_steps.tolist()}, Final Encoder: {final_encoder_pos.tolist()}.")
-                    self._perform_sync_check()
-                    time.sleep(0.1)
-            
-            logging.error(f"Failed to reach target for '{mode}' after {max_retries} attempts.")
-            self.robot_state = self.STATE_IDLE
-            return False
-
-        else:
-            # --- OPEN-LOOP MODE (Trust the Controller) ---
-            logging.warning("Encoder not connected. Running in open-loop mode; position accuracy not guaranteed.")
-            
-            self.robot_state = self.STATE_MOVING
-            for idx in range(num_joints):
-                joint_def = self.get_joint_definition(idx)
-                command = f"{joint_def['command_letter']}{int(target_pose_steps[idx])}"
-                self.send_command_to_robot(command)
-            
-            timeout = 120.0
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                if self.stop_execution_flag:
-                    logging.info(f"{mode} stopped by user.")
-                    self.robot_state = self.STATE_IDLE
-                    return False
-
-                live_positions = self.get_current_positions()
-                if live_positions:
-                    live_pose_steps = np.array(live_positions[:num_joints])
-                    if status_callback: status_callback(live_pose_steps)
-                    if np.all(np.abs(live_pose_steps - target_pose_steps) <= 2):
-                        logging.info(f"Open-loop move for '{mode}' complete. Controller reports arrival.")
-                        self.robot_state = self.STATE_IDLE
-                        if status_callback: status_callback(live_pose_steps)
-                        return True
-                time.sleep(0.1)
-            
-            logging.error(f"TIMEOUT: Robot failed to reach target pose during open-loop '{mode}'.")
-            self.robot_state = self.STATE_IDLE
-            return False
-    
-    def jog_joint(self, joint_index: int, steps_to_move: int, status_callback=None):
-        """
-        Moves a single joint by a relative number of steps.
-        """
-        if not self.is_motor_controller_connected():
-            logging.warning("Cannot jog: Robot not connected.")
-            return
-                
-        if not (0 <= joint_index < len(self.articulated_chain)):
-            logging.error(f"Cannot jog: Invalid joint index {joint_index}.")
-            return
-
-        initial_pos_steps = None
-        if self.is_encoder_connected():
-            with self.encoder_data_lock:
-                initial_pos_steps = np.array(self.true_encoder_position)
-        else:
-            controller_pos = self.get_current_positions()
-            if controller_pos:
-                initial_pos_steps = np.array(controller_pos[:len(self.articulated_chain)])
-
-        if initial_pos_steps is None:
-            logging.error("Cannot jog: Failed to get current robot position.")
-            return
-
-        current_steps = initial_pos_steps[joint_index]
-        
-        target_steps_for_joint = current_steps + steps_to_move
-        
-        target_pose_steps = np.copy(initial_pos_steps)
-        target_pose_steps[joint_index] = target_steps_for_joint
-        
-        joint_def = self.get_joint_definition(joint_index)
-        self.move_to_specific_pose(target_pose_steps, status_callback, f"Jogging {joint_def['name']}")
-    
     def _toggle_mri_fiducials(self, checked: bool):
         """Toggles visibility of only the fiducials detected from the MRI scan."""
         self.markers_visible = checked
@@ -2151,6 +2165,34 @@ class MamriLogic(ScriptedLoadableModuleLogic):
     def _toggle_robot_models(self, checked: bool):
         for model_node in self.jointModelNodes.values():
             if disp := model_node.GetDisplayNode(): disp.SetVisibility(checked)
+            
+    def send_target_pose_commands(self, target_pose_steps: np.ndarray):
+        """Sends all joint commands for a target pose without blocking."""
+        if not self.is_motor_controller_connected():
+            return
+        
+        logging.info(f"Sending robot to target steps: {target_pose_steps.tolist()}")
+        self.robot_state = self.STATE_MOVING
+        for idx, pos in enumerate(target_pose_steps):
+            joint_def = self.get_joint_definition(idx)
+            command = f"{joint_def['command_letter']}{int(pos)}"
+            self.send_command_to_robot(command)
+
+    def send_stop_commands(self):
+        """Sends commands to halt robot motion, using its last known position."""
+        if not self.is_motor_controller_connected():
+            return
+        
+        current_positions = self.last_known_mc_position or self.get_current_positions()
+        if not current_positions:
+            logging.error("Cannot send stop command: failed to get current position.")
+            return
+
+        logging.info(f"Sending soft stop/hold command to position: {current_positions[:self.num_joints]}")
+        for i, pos in enumerate(current_positions[:self.num_joints]):
+            joint_def = self.get_joint_definition(i)
+            command = f"{joint_def['command_letter']}{int(pos)}"
+            self.send_command_to_robot(command)
 # MamriTest
 #
 class MamriTest(ScriptedLoadableModuleTest):
