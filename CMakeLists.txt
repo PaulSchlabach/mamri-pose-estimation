@@ -10,7 +10,7 @@ slicer_extension_add_meta_data(
   DESCRIPTION "This extension intends to provide tools for automatic fiducial detection for MR-safe biopsy robots of the University of Twente."
   CONTRIBUTORS "Paul Schlabach (University of Twente)"
   HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/FiducialDetector"
-  ICON_FILENAME "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icons/FiducialDetector.png" # Path to an icon within your repo
+  ICON_FILENAME "${CMAKE_CURRENT_SOURCE_DIR}/FiducialDetector.png" # Path to an icon within your repo
   SCREENSHOT_FILENAMES "" # Paths to screenshots within your repo
   DEPENDS "" # List of other required extensions, e.g., "Markups;SegmentEditor"
   )
