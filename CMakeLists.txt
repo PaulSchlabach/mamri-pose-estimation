@@ -19,6 +19,7 @@ include(${Slicer_USE_FILE})
 #-----------------------------------------------------------------------------
 # Extension modules
 add_subdirectory(Mamri)
+add_subdirectory(MamriTest)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------

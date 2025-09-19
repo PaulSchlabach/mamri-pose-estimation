@@ -368,6 +368,22 @@
                   </property>
                  </widget>
                 </item>
+                <item row="3" column="0" colspan="2">
+                 <widget class="ctkCheckBox" name="syncControllerCheckBox">
+                  <property name="toolTip">
+                   <string>If checked, automatically corrects the motor controller's internal position to match the encoder's position when the robot is idle.</string>
+                  </property>
+                  <property name="text">
+                   <string>Sync Controller to Encoder</string>
+                  </property>
+                  <property name="checked">
+                   <bool>true</bool>
+                  </property>
+                  <property name="SlicerParameterName" stdset="0">
+                   <string>syncControllerToEncoder</string>
+                  </property>
+                 </widget>
+                </item>
                </layout>
               </widget>
              </item>

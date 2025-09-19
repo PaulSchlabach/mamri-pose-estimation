@@ -18,7 +18,7 @@
   {
     "name": "Joint1",
     "stl_path": "Joint1.STL",
-    "collision_stl_path": "Shoulder1_collision.STL",
+    "collision_stl_path": "Joint1_collision.STL",
     "parent": "Baseplate",
     "fixed_offset_to_parent": { "translate": [0, 0, 20.0] },
     "has_markers": false,
@@ -31,7 +31,7 @@
   {
     "name": "Joint2",
     "stl_path": "Joint2.STL",
-    "collision_stl_path": "Link1_collision.STL",
+    "collision_stl_path": "Joint2_collision.STL",
     "parent": "Joint1",
     "fixed_offset_to_parent": { "translate": [0, 0, 30] },
     "has_markers": true,
@@ -50,7 +50,7 @@
   {
     "name": "Joint3",
     "stl_path": "Joint3.STL",
-    "collision_stl_path": "Shoulder2_collision.STL",
+    "collision_stl_path": "Joint3_collision.STL",
     "parent": "Joint2",
     "fixed_offset_to_parent": { "translate": [0, 0, 150] },
     "has_markers": false,
@@ -82,7 +82,7 @@
   {
     "name": "Joint5",
     "stl_path": "Joint5.STL",
-    "collision_stl_path": "Wrist_collision.STL",
+    "collision_stl_path": "Joint5_collision.STL",
     "parent": "Joint4",
     "fixed_offset_to_parent": { "translate": [0, 0, 155] },
     "has_markers": false,
