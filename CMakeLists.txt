@@ -4,13 +4,16 @@ project(FiducialDetector)
 
 #-----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/FiducialDetector")
-set(EXTENSION_CONTRIBUTORS "Paul Schlabach (University of Twente)")
-set(EXTENSION_DESCRIPTION "This extension intends to provide tools for automatic fiducial detection for MR-safe biopsy robots of the University of Twente")
-set(EXTENSION_ICONURL "https://www.example.com/Slicer/Extensions/FiducialDetector.png")
-set(EXTENSION_SCREENSHOTURLS "https://www.example.com/Slicer/Extensions/FiducialDetector/Screenshots/1.png")
-set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
-
+slicer_extension_add_meta_data(
+  NAME "FiducialDetector"
+  CATEGORY "Robotics"  # You can change this to a more appropriate category
+  DESCRIPTION "This extension intends to provide tools for automatic fiducial detection for MR-safe biopsy robots of the University of Twente."
+  CONTRIBUTORS "Paul Schlabach (University of Twente)"
+  HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/FiducialDetector"
+  ICON_FILENAME "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icons/FiducialDetector.png" # Path to an icon within your repo
+  SCREENSHOT_FILENAMES "" # Paths to screenshots within your repo
+  DEPENDS "" # List of other required extensions, e.g., "Markups;SegmentEditor"
+  )
 #-----------------------------------------------------------------------------
 # Extension dependencies
 find_package(Slicer REQUIRED)
