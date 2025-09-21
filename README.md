@@ -59,13 +59,17 @@ To use this module, you need to connect both components:
 To install this extension and the MAMRI module into 3D Slicer:
 
 1.  Download this repository.
-2.  Open 3D Slicer.
-3.  Open the Python terminal.
-4.  Type in `slicer.util.pip_install('pyserial')`.
-5.  In the Module drop down menu, under **Developer Tools** select **Extension Wizard**.
+2.  Unpack the zip file. It should result in the folder **mamri-pose-estimation-main**.
+3.  Open 3D Slicer.
+4.  Open the Python terminal.
+5.  Type in `slicer.util.pip_install('pyserial')`.
+6.  In the Module drop down menu, under **Developer Tools** select **Extension Wizard**.
+7.  In the **Extension Wizard** click **Select Extension**.
+8.  Browse for the folder from step 2.
+9.  The module is now installed and can be found in the Module drop down menu, under **Robotics** as **Mamri Robot Arm**.
 
 ---
 
 ## About
 
-This module was developed by **Paul Schlabach** as part of a Master's Thesis at the research group **Robotics and Mechatronics** at the **University of Twente**. The project was supervised by **Vincent Groenhuis**. Thank you **Vincent**!!!
+This module was developed by **Paul Schlabach** as part of a Master's Thesis at the research group **Robotics and Mechatronics** at the **University of Twente**. If you need to get in touch with me **paul@schlabach.biz**. The project was supervised by **Vincent Groenhuis**. Thank you **Vincent**!!!
