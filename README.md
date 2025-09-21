@@ -72,4 +72,4 @@ To install this extension and the MAMRI module into 3D Slicer:
 
 ## About
 
-This module was developed by **Paul Schlabach** as part of a Master's Thesis at the research group **Robotics and Mechatronics** at the **University of Twente**. If you need to get in touch with me **paul@schlabach.biz**. The project was supervised by **Vincent Groenhuis**. Thank you **Vincent**!!!
+This module was developed by **Paul Schlabach** as part of a Master's Thesis at the research group **Robotics and Mechatronics** at the **University of Twente**. If you need to get in touch with me: **paul@schlabach.biz**. The project was supervised by **Vincent Groenhuis**. Thank you **Vincent**!!!
