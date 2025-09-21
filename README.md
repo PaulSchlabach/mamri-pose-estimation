@@ -60,9 +60,9 @@ To install this extension and the MAMRI module into 3D Slicer:
 
 1.  Download this repository.
 2.  Open 3D Slicer.
-3.  Open the Extension Manager using `CTRL + 4`.
-4.  Click **Install from file...** and browse for the downloaded repository.
-5.  Restart 3D Slicer to complete the installation.
+3.  Open the Python terminal.
+4.  Type in `slicer.util.pip_install('pyserial')`.
+5.  In the Module drop down menu, under **Developer Tools** select **Extension Wizard**.
 
 ---
 
